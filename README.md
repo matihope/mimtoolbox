@@ -14,68 +14,6 @@ mimtoolbox.py <command> [options]
 
 `mimtoolbox.py --help` and `mimtoolbox.py <command> --help` list all options.
 
-## Requirements
-
-mimtoolbox uses only the Python standard library, so there's nothing to `pip install`. It does call
-these programs, which must already be installed. On the MIMUW side (`students` and the lab PCs),
-everything listed is provided by the faculty.
-
-**All commands** (on your computer):
-
-| program | needed for | install |
-|---|---|---|
-| Python 3.8+ (`python3`) | everything | macOS: `brew install python`; Linux: your distro's `python3` |
-| OpenSSH client (`ssh`, `scp`) | everything | preinstalled on macOS; Linux: `openssh-client` (Debian/Ubuntu) / `openssh` (Arch) |
-| `ssh-copy-id` | `setup`, when copying your key | comes with the OpenSSH client |
-| an SSH key (`~/.ssh/id_ed25519` or similar) | passwordless logins set up by `setup` | `ssh-keygen -t ed25519` |
-| `fzf` *(optional)* | picking a lab PC from a fuzzy list; without it you get a numbered list | `brew install fzf` / your distro's `fzf` |
-
-**`print`**: nothing beyond the above.
-
-**`lab-display` on macOS:**
-
-| program | install |
-|---|---|
-| [BetterDisplay](https://github.com/waydabber/BetterDisplay) in `/Applications`, with *CLI integration* enabled in its settings | `brew install --cask betterdisplay` |
-| `ffmpeg` (with AVFoundation and VideoToolbox, as in Homebrew's build) | `brew install ffmpeg` |
-
-**`lab-display` on Linux** (Wayland session with a ScreenCast portal that can create virtual monitors,
-e.g. GNOME):
-
-| program / plugin | Arch | Debian / Ubuntu |
-|---|---|---|
-| `gst-launch-1.0`, `gst-inspect-1.0` | `gstreamer` | `gstreamer1.0-tools` |
-| `videoconvert`, `videorate` | `gst-plugins-base` | `gstreamer1.0-plugins-base` |
-| `pipewiresrc` | `gst-plugin-pipewire` | `gstreamer1.0-pipewire` |
-| `h264parse`, `mpegtsmux` | `gst-plugins-bad` | `gstreamer1.0-plugins-bad` |
-| one H.264 encoder: `vah264lpenc`/`vah264enc` (hardware, preferred), `x264enc`, or `openh264enc` | `gst-plugin-va`, `gst-plugins-ugly`, or `gst-plugin-openh264` | `gstreamer1.0-plugins-bad` (VA), `gstreamer1.0-plugins-ugly` (x264) |
-| PyGObject (`import gi`) | `python-gobject` | `python3-gi` |
-
-**On the MIMUW side**, which you don't install yourself but the tools rely on:
-
-- On `students`: the `lk_booted_pcs` command, plus `lk_print_quota` for `print --quota`.
-- On the lab PCs: `lp`, `lpstat` and `lpoptions` for `print`; `ffplay`, `bash`, `pgrep`/`pkill` and
-  `xrandr` for `lab-display`. `xrandr` only detects the resolution; without it you get 1920x1080.
-
-## Install
-
-1. Clone the repo anywhere and put that directory on your `PATH`. The only executable in it is
-   `mimtoolbox.py`, so nothing else gets onto your `PATH`.
-
-   ```sh
-   git clone git@github.com:matihope/mim-toolbox.git ~/mim-toolbox
-   # fish
-   fish_add_path ~/mim-toolbox
-   # bash / zsh (add to ~/.bashrc or ~/.zshrc)
-   export PATH="$HOME/mim-toolbox:$PATH"
-   ```
-
-2. Run the setup once on every machine you use:
-
-   ```sh
-   mimtoolbox.py setup
-   ```
-
 ## `setup`: per-machine config
 
 `setup` asks for each setting and writes `~/.mimtoolbox.config` (to keep it somewhere else, set
@@ -153,6 +91,90 @@ Before the first run, install what's listed under [Requirements](#requirements).
 - **Linux:** the first run shows a screen-sharing dialog. Later runs skip it, because a restore
   token is saved in `~/.local/state/mimtoolbox/`.
 - If you have several H.264 encoders, choose one with `--encoder` or the `encoder` setting.
+
+## Requirements
+
+mimtoolbox uses only the Python standard library, so there's nothing to `pip install`. It calls the
+programs below, which you install once per machine. Everything on the MIMUW side (`students` and the
+lab PCs) is provided by the faculty.
+
+**macOS** (Homebrew; `ssh`, `scp` and `ssh-copy-id` come with the system):
+
+```sh
+brew install python fzf
+brew install ffmpeg && brew install --cask betterdisplay    # lab-display only
+```
+
+**Ubuntu / Debian:**
+
+```sh
+sudo apt install python3 openssh-client fzf
+sudo apt install gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-pipewire python3-gi    # lab-display only
+```
+
+**Arch:**
+
+```sh
+sudo pacman -S --needed python openssh fzf
+sudo pacman -S --needed gstreamer gst-plugins-base gst-plugins-bad gst-plugin-va gst-plugins-ugly gst-plugin-pipewire python-gobject    # lab-display only
+```
+
+If you don't have an SSH key yet, create one with `ssh-keygen -t ed25519`.
+
+What each program is for:
+
+| program | needed for |
+|---|---|
+| Python 3.8+ (`python3`) | everything |
+| OpenSSH client (`ssh`, `scp`, `ssh-copy-id`) | everything; `ssh-copy-id` only for `setup` |
+| an SSH key (`~/.ssh/id_ed25519` or similar) | passwordless logins set up by `setup` |
+| `fzf` *(optional)* | picking a lab PC from a fuzzy list; without it you get a numbered list |
+| [BetterDisplay](https://github.com/waydabber/BetterDisplay) with *CLI integration* enabled in its settings | `lab-display` on macOS: the virtual screen |
+| `ffmpeg` (with AVFoundation and VideoToolbox, as in Homebrew's build) | `lab-display` on macOS: capture and encoding |
+| GStreamer and PyGObject (table below) | `lab-display` on Linux |
+
+`print` needs nothing beyond the common programs.
+
+`lab-display` on Linux needs a Wayland session whose ScreenCast portal can create virtual monitors
+(e.g. GNOME). The packages in the commands above provide:
+
+| program / plugin | Arch | Debian / Ubuntu |
+|---|---|---|
+| `gst-launch-1.0`, `gst-inspect-1.0` | `gstreamer` | `gstreamer1.0-tools` |
+| `videoconvert`, `videorate` | `gst-plugins-base` | `gstreamer1.0-plugins-base` |
+| `pipewiresrc` | `gst-plugin-pipewire` | `gstreamer1.0-pipewire` |
+| `h264parse`, `mpegtsmux` | `gst-plugins-bad` | `gstreamer1.0-plugins-bad` |
+| H.264 encoder: `vah264lpenc`/`vah264enc` (hardware, preferred) or `x264enc` (software fallback) | `gst-plugin-va`, `gst-plugins-ugly` | `gstreamer1.0-plugins-bad`, `gstreamer1.0-plugins-ugly` |
+| PyGObject (`import gi`) | `python-gobject` | `python3-gi` |
+
+The hardware encoders also need your GPU's VA-API driver (e.g. `intel-media-driver` /
+`intel-media-va-driver` for Intel, Mesa for AMD). Without it, the `x264enc` software encoder is
+used.
+
+**On the MIMUW side**, which you don't install yourself but the tools rely on:
+
+- On `students`: the `lk_booted_pcs` command, plus `lk_print_quota` for `print --quota`.
+- On the lab PCs: `lp`, `lpstat` and `lpoptions` for `print`; `ffplay`, `bash`, `pgrep`/`pkill` and
+  `xrandr` for `lab-display`. `xrandr` only detects the resolution; without it you get 1920x1080.
+
+## Install
+
+1. Clone the repo anywhere and put that directory on your `PATH`. The only executable in it is
+   `mimtoolbox.py`, so nothing else gets onto your `PATH`.
+
+   ```sh
+   git clone git@github.com:matihope/mim-toolbox.git ~/mim-toolbox
+   # fish
+   fish_add_path ~/mim-toolbox
+   # bash / zsh (add to ~/.bashrc or ~/.zshrc)
+   export PATH="$HOME/mim-toolbox:$PATH"
+   ```
+
+2. Run the setup once on every machine you use:
+
+   ```sh
+   mimtoolbox.py setup
+   ```
 
 ## Adding a tool
 
