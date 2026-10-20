@@ -105,6 +105,17 @@ class PriorityTest(IsolatedTestCase):
         for args in (latency, fallback, quality):
             self.assertEqual(args[args.index("-bf") + 1], "0")  # B-frames would add delay
 
+    def test_x264_gets_the_frame_rate(self) -> None:
+        """Regression: x264 must be told the frame rate, which screen capture doesn't report.
+
+        Without it x264 took the capture's 1/1000000 time base as the rate, spread the bitrate over a
+        million frames a second and sent a gray, almost empty picture.
+        """
+        args = lab_display.mac_encoder_args(stream(), have_libx264=True)
+        self.assertEqual(args[args.index("-x264-params") + 1], "fps=60")
+        args = lab_display.mac_encoder_args(lab_display.Stream("1920x1080", "45", "8M", "off", "", "latency"), True)
+        self.assertEqual(args[args.index("-x264-params") + 1], "fps=45")
+
     def test_player_paces_by_video(self) -> None:
         """ffplay shows frames as they arrive instead of slowing to an external clock."""
         for opt in ("-sync video", "-fflags nobuffer", "-flags low_delay", "-framedrop"):

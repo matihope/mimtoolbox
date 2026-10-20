@@ -147,7 +147,10 @@ def mac_encoder_args(s: Stream, have_libx264: bool) -> list[str]:
     """ffmpeg encoder options for the stream: x264 for low latency (if available), else VideoToolbox."""
     rate = ["-b:v", s.bitrate, "-maxrate", s.bitrate, "-g", s.fps, "-bf", "0"]
     if s.priority == "latency" and have_libx264:
-        return ["-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", *rate, "-bufsize", s.bitrate]
+        # AVFoundation screen capture reports no frame rate, so x264 would take the 1/1000000 time base
+        # for one, spread the bitrate over a million frames a second and send an almost empty, gray picture.
+        return ["-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-x264-params", f"fps={s.fps}",
+                *rate, "-bufsize", s.bitrate]
     speed = "1" if s.priority == "latency" else "0"
     return ["-c:v", "h264_videotoolbox", "-realtime", "1", "-prio_speed", speed, *rate, "-profile:v", "high"]
 
