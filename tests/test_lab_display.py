@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import signal
 import sys
+import time
 import types
 from typing import Any, Sequence
 
@@ -305,3 +307,53 @@ class MainTest(IsolatedTestCase):
         self.assertIn("ffplay not found on white02", self.stderr.getvalue())
         self.assertEqual(run.call_args.args[0][-2:], ["white02", "command -v ffplay >/dev/null"])
         self.assertEqual(KnownPCs(make_ctx()).hosts, ["white02"])
+
+
+class StopProcessesTest(IsolatedTestCase):
+    """Stopping the capture and player processes on cleanup."""
+
+    def spawn(self, ignore_sigterm: bool) -> int:
+        """Fork a child that sleeps (optionally ignoring SIGTERM, like ffmpeg stuck waiting for a frame)."""
+        pid = os.fork()
+        if pid == 0:
+            if ignore_sigterm:
+                signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            time.sleep(30)
+            os._exit(0)
+        self.addCleanup(self.reap, pid)
+        time.sleep(0.2)  # let the child set up its signal handling
+        return pid
+
+    def reap(self, pid: int) -> None:
+        """Make sure a child is gone after the test."""
+        try:
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+        except (ProcessLookupError, ChildProcessError):
+            pass
+
+    def assertGone(self, pid: int) -> None:
+        """The process no longer exists."""
+        with self.assertRaises((ProcessLookupError, ChildProcessError)):
+            os.kill(pid, 0)
+            os.waitpid(pid, os.WNOHANG)
+
+    def test_sigterm_suffices(self) -> None:
+        """A process that exits on SIGTERM is stopped without waiting for the timeout."""
+        pid = self.spawn(ignore_sigterm=False)
+        start = time.monotonic()
+        lab_display.stop_processes([pid], timeout=5)
+        self.assertLess(time.monotonic() - start, 2)
+        self.assertGone(pid)
+
+    def test_stuck_process_is_killed(self) -> None:
+        """Regression: a process ignoring SIGTERM gets SIGKILL after the timeout instead of running on."""
+        pid = self.spawn(ignore_sigterm=True)
+        lab_display.stop_processes([pid], timeout=0.3)
+        self.assertGone(pid)
+
+    def test_already_gone(self) -> None:
+        """Processes that have already exited are fine."""
+        pid = self.spawn(ignore_sigterm=False)
+        self.reap(pid)
+        lab_display.stop_processes([pid], timeout=0.3)  # must not raise

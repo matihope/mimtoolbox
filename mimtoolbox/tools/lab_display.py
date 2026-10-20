@@ -408,16 +408,53 @@ def make_backend(ctx: Context, stream: Stream) -> Backend:
     die(f"unsupported platform {sys.platform}")
 
 
-def cleanup(ctx: Context, host: str, backend: Backend, pids: Sequence[int] = ()) -> None:
-    """Stop local processes, the virtual monitor, ffplay on the lab PC and the ssh master.
+def _alive(pid: int) -> bool:
+    """Whether a process is still running; reaps it if it's our child that has exited."""
+    try:
+        if os.waitpid(pid, os.WNOHANG)[0] == pid:
+            return False
+    except ChildProcessError:  # not our child (the guardian's case) or already reaped
+        pass
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
 
-    Idempotent: safe to run from both the main process and the guardian.
+
+def stop_processes(pids: Sequence[int], timeout: float = 2.0) -> None:
+    """SIGTERM the processes, and SIGKILL those still running after `timeout` seconds.
+
+    ffmpeg only notices SIGTERM between frames, so one waiting for a frame that never comes (e.g. from
+    a virtual screen that's gone) would otherwise run forever.
     """
     for pid in pids:
         try:
             os.kill(pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
+    deadline = time.monotonic() + timeout
+    remaining = [pid for pid in pids if _alive(pid)]
+    while remaining and time.monotonic() < deadline:
+        time.sleep(0.05)
+        remaining = [pid for pid in remaining if _alive(pid)]
+    for pid in remaining:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    deadline = time.monotonic() + 1  # SIGKILL can't be ignored; just reap our children
+    while remaining and time.monotonic() < deadline:
+        remaining = [pid for pid in remaining if _alive(pid)]
+        time.sleep(0.01)
+
+
+def cleanup(ctx: Context, host: str, backend: Backend, pids: Sequence[int] = ()) -> None:
+    """Stop local processes, the virtual monitor, ffplay on the lab PC and the ssh master.
+
+    Idempotent: safe to run from both the main process and the guardian.
+    """
+    stop_processes(pids)  # before removing the virtual monitor, which a capture may be waiting on
     backend.cleanup()
     run(lab_ssh(ctx, host, connect_timeout=10) + [remote_cleanup_cmd()],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
