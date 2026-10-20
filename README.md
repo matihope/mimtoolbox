@@ -48,9 +48,18 @@ connections go through `students.mimuw.edu.pl`, which is built in.
 ## `print`: the student printer
 
 You can't print from `students` itself, but you can from the lab PCs. So `print` picks a booted lab
-PC, copies your files there through `students`, runs `lp` on them and removes the copies. It reuses
-the lab PC that worked last time; otherwise it picks a random booted one, which may ask for your
-password once.
+PC, copies your files there through `students`, runs `lp` on them and removes the copies.
+
+To avoid password prompts, it remembers the lab PCs that let you in with your SSH key
+(`~/.cache/mimtoolbox/lab-pcs`). Each run it asks `students` which PCs are booted and compares that
+list with the remembered ones:
+
+1. It tries up to three remembered PCs that are booted right now, most recently used first.
+2. If none of them takes the key, it picks a random booted PC, which asks for your password once.
+   That PC is remembered from then on.
+
+Switched-off PCs are never tried, so you don't wait for timeouts. They stay on the list for later.
+A remembered PC that's booted but rejects the key is dropped from the list.
 
 ```sh
 mimtoolbox.py print notes.pdf -1              # one-sided (the printer duplexes by default)

@@ -14,7 +14,8 @@ Examples:
   mimtoolbox.py print --list-options            printer-specific options reported by `lpoptions -l`
   mimtoolbox.py print --quota                   pages left this period
 
-The lab PC that worked last is remembered in ~/.cache/mimtoolbox/print-host.
+Lab PCs that took your SSH key are remembered (in ~/.cache/mimtoolbox/lab-pcs) and tried first, so
+usually no password is needed; otherwise a random booted PC is used and asks for it once.
 """
 
 from __future__ import annotations
@@ -26,7 +27,8 @@ import shlex
 import subprocess
 from typing import Any, Mapping, Sequence
 
-from mimtoolbox.core import ConfigField, Context, booted_pcs, close_master, die, lab_ssh, lab_ssh_opts, log, run
+from mimtoolbox.core import (ConfigField, Context, KnownPCs, booted_pcs, close_master, die, lab_ssh, lab_ssh_opts,
+                             log, run)
 
 COMMAND: str = "print"
 HELP: str = "Print using the MIM student printer (via students + a lab PC)."
@@ -44,11 +46,6 @@ QUALITY: Mapping[str, int] = {"draft": 3, "normal": 4, "high": 5}
 ORIENTATION: Mapping[str, int] = {"portrait": 3, "landscape": 4, "reverse-landscape": 5, "reverse-portrait": 6}
 
 
-def host_cache(ctx: Context) -> pathlib.Path:
-    """File remembering the lab PC that worked last."""
-    return ctx.cache_dir / "print-host"
-
-
 class Lab:
     """A lab PC to run commands on, through this tool's ssh master connection."""
 
@@ -64,7 +61,7 @@ class Lab:
         """Run a shell command on the PC; exits (and forgets the PC) if ssh itself fails."""
         res = run(lab_ssh(self.ctx, self.host, self.batch, connect_timeout=8) + [cmd], dry_run=self.dry_run, **kw)
         if res.returncode == 255:  # ssh itself failed; anything else came from cmd
-            forget_host(self.ctx, self.host)
+            KnownPCs(self.ctx).forget(self.host)
             die(f"ssh to {self.host} failed" + (f": {res.stderr.strip()}" if res.stderr else ""))
         return res
 
@@ -78,40 +75,54 @@ class Lab:
         close_master(self.ctx, self.host, self.dry_run)
 
 
+MAX_KEY_TRIES: int = 3
+"""How many booted known PCs to try with the key before falling back to a password login."""
+
+
 def can_login(ctx: Context, host: str) -> bool:
-    """Whether the PC lets us in without a password."""
+    """Whether the PC lets us in with the key, without a password.
+
+    Also opens the ssh master connection, which later commands reuse.
+    """
     return run(lab_ssh(ctx, host, batch=True, connect_timeout=8) + ["true"], capture_output=True).returncode == 0
 
 
-def forget_host(ctx: Context, host: str) -> None:
-    """Drop `host` from the cache if it's the remembered one."""
-    try:
-        if host_cache(ctx).read_text().strip() == host:
-            host_cache(ctx).unlink()
-    except OSError:
-        pass
+def login(ctx: Context, known: KnownPCs, host: str) -> Lab:
+    """Log in to `host`, letting ssh ask for the password if needed, and remember it.
+
+    Exits if the login fails.
+    """
+    lab = Lab(ctx, host, batch=False)
+    lab.ssh("true")  # opens the master connection, so the password is asked for only here
+    known.remember(host)
+    return lab
 
 
 def connect(ctx: Context, host: str | None, dry_run: bool = False) -> Lab:
-    """Choose the lab PC to use.
+    """Choose a lab PC and log in to it, preferring PCs that take the key (no password prompt).
 
-    `host`, else the last PC that worked if it still takes our key (no prompt), else a random booted PC;
-    ssh asks for the password there once, after which key logins to it work too.
+    In order:
+      1. `host`, if given.
+      2. Up to MAX_KEY_TRIES known PCs that are booted now, most recently used first, if they take the key.
+      3. A random booted PC; ssh asks for the password there.
+    Only booted PCs are tried, so a switched-off one never costs a connection timeout. A booted known
+    PC that rejects the key is forgotten; one that is switched off stays known.
     """
-    if host or dry_run:
-        return Lab(ctx, host or "<lab-pc>", batch=False, dry_run=dry_run)
-    cache = host_cache(ctx)
-    try:
-        cached = cache.read_text().strip()
-    except OSError:
-        cached = ""
-    if cached and can_login(ctx, cached):
-        return Lab(ctx, cached)
-    lab = Lab(ctx, random.choice([h for h in booted_pcs(ctx) if h != cached]), batch=False)
-    log(f"using {lab.host}; it may ask for your password once")
-    cache.parent.mkdir(parents=True, exist_ok=True)
-    cache.write_text(lab.host + "\n")
-    return lab
+    if dry_run:
+        return Lab(ctx, host or "<lab-pc>", batch=False, dry_run=True)
+    known = KnownPCs(ctx)
+    if host:
+        return login(ctx, known, host)
+
+    booted = booted_pcs(ctx)
+    for h in [h for h in known.hosts if h in booted][:MAX_KEY_TRIES]:
+        if can_login(ctx, h):
+            known.remember(h)
+            return Lab(ctx, h)
+        known.forget(h)  # booted, but doesn't take the key (any more)
+    host = random.choice(booted)
+    log(f"using {host}; it may ask for your password")
+    return login(ctx, known, host)
 
 
 def lp_args(a: argparse.Namespace) -> list[str]:
@@ -240,7 +251,8 @@ def add_arguments(ap: argparse.ArgumentParser) -> None:
                    help="raw lp -o option, repeatable (see --list-options)")
 
     g = ap.add_argument_group("connection")
-    g.add_argument("-H", "--host", help="lab PC to print from (default: the last one used, else a random booted one)")
+    g.add_argument("-H", "--host", help="lab PC to print from (default: a booted, remembered one that takes your key, "
+                   "else a random booted one)")
     g.add_argument("--dry-run", action="store_true", help="show the commands instead of running them")
     g.add_argument("--list-options", action="store_true", help="show the printer's options (lpoptions -l)")
     g.add_argument("--status", action="store_true", help="show the print queue (lpstat -o)")

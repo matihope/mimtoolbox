@@ -168,6 +168,45 @@ def booted_pcs(ctx: Context) -> list[str]:
     return hosts
 
 
+class KnownPCs:
+    """Lab PCs that recently let us in with the SSH key, most recently used first.
+
+    A lab PC doesn't always take the key (e.g. before you've logged in to it with a password), so
+    trying these first avoids password prompts. Shared by all tools, stored in
+    ~/.cache/mimtoolbox/lab-pcs, one host per line.
+    """
+
+    LIMIT: int = 20
+    """How many PCs to remember."""
+
+    def __init__(self, ctx: Context) -> None:
+        """Load the list; a missing or unreadable file means no known PCs."""
+        self.path = ctx.cache_dir / "lab-pcs"
+        try:
+            self.hosts = [h for h in self.path.read_text().split() if h]
+        except OSError:
+            self.hosts = []
+
+    def remember(self, host: str) -> None:
+        """Move `host` to the front of the list and save it."""
+        self.hosts = [host] + [h for h in self.hosts if h != host][:self.LIMIT - 1]
+        self._save()
+
+    def forget(self, host: str) -> None:
+        """Drop `host` from the list and save it."""
+        if host in self.hosts:
+            self.hosts.remove(host)
+            self._save()
+
+    def _save(self) -> None:
+        """Write the list; failures are ignored, since it's only a cache."""
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text("".join(h + "\n" for h in self.hosts))
+        except OSError:
+            pass
+
+
 def pick_pc_interactive(hosts: Sequence[str]) -> str:
     """Let the user choose one of `hosts`, with fzf if installed, else from a numbered list.
 
