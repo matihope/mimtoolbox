@@ -46,8 +46,8 @@ HELP: str = "Use a lab PC's monitor as an extra display."
 CONFIG: Mapping[str, ConfigField] = {
     "fps": ConfigField("30", "frames per second"),
     "bitrate": ConfigField("8M", "video bitrate (e.g. 8M, 4500k)"),
-    "hidpi": ConfigField("off", "macOS: HiDPI virtual screen (on/off)"),
-    "encoder": ConfigField("", "Linux: GStreamer H.264 encoder element (empty = best available)"),
+    "hidpi": ConfigField("off", "HiDPI virtual screen (on/off)", platform="darwin"),
+    "encoder": ConfigField("", "GStreamer H.264 encoder element (empty = best available)", platform="linux"),
 }
 
 SCREEN_NAME: str = "LabDisplay"

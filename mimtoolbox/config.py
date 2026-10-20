@@ -7,12 +7,11 @@ import os
 import pathlib
 from typing import Mapping, Sequence
 
-from mimtoolbox.core import ConfigField, Context, Tool, copy_ssh_key, die, log
+from mimtoolbox.core import ConfigField, Context, Tool, copy_ssh_key, die, key_login_works, log
 
 COMMON_SECTION: str = "common"
 COMMON: Mapping[str, ConfigField] = {
     "lab_user": ConfigField(None, "your MIMUW login (e.g. ab123456)"),
-    "jump": ConfigField("students.mimuw.edu.pl", "ssh host that reaches the lab PCs"),
 }
 HEADER: str = "# mimtoolbox settings for this machine; edit by hand or re-run `mimtoolbox.py setup`.\n\n"
 
@@ -68,8 +67,8 @@ def common_context(cp: configparser.ConfigParser, tool: Tool | None = None) -> C
     if missing:
         die(f"{', '.join(missing)} not set in {config_path()} - run `mimtoolbox.py setup` first")
     if tool is None:
-        return Context("setup", common["lab_user"], common["jump"], {})
-    return Context(tool.COMMAND, common["lab_user"], common["jump"], resolve(cp, tool.COMMAND, tool.CONFIG))
+        return Context("setup", common["lab_user"], {})
+    return Context(tool.COMMAND, common["lab_user"], resolve(cp, tool.COMMAND, tool.CONFIG))
 
 
 def _input(prompt: str) -> str:
@@ -101,14 +100,23 @@ def _yes(prompt: str) -> bool:
 def setup(tools: Sequence[Tool]) -> int:
     """Interactively fill in the config file, then offer to set up SSH key logins.
 
+    Settings for another platform (e.g. macOS-only ones on Linux) are neither asked for nor written;
+    values already in the file are kept. Keys that no setting defines (any more) are removed.
+
     Returns:
         The exit status.
     """
     cp = load()
     sections: list[tuple[str, Mapping[str, ConfigField]]] = [(COMMON_SECTION, COMMON)]
-    sections += [(t.COMMAND, t.CONFIG) for t in tools if t.CONFIG]
+    sections += [(t.COMMAND, t.CONFIG) for t in tools]
     print(f"Settings for {config_path()} (Enter keeps the value in brackets, - clears it).")
-    for section, fields in sections:
+    for section, all_fields in sections:
+        for key in cp.options(section) if cp.has_section(section) else []:
+            if key not in all_fields:  # a setting that no longer exists
+                cp.remove_option(section, key)
+        fields = {key: field for key, field in all_fields.items() if field.applies_here()}
+        if not fields:
+            continue
         print(f"[{section}]")
         current = resolve(cp, section, fields)
         if not cp.has_section(section):
@@ -119,6 +127,8 @@ def setup(tools: Sequence[Tool]) -> int:
 
     ctx = common_context(cp)
     # The lab PCs share /home (and so ~/.ssh/authorized_keys) with the jump host, so this covers them too.
-    if _yes(f"Set up SSH key login to {ctx.jump} and the lab PCs?"):
+    if key_login_works(ctx.jump):
+        log(f"SSH key login to {ctx.jump} (and so the lab PCs) already works")
+    elif _yes(f"Set up SSH key login to {ctx.jump} and the lab PCs?"):
         copy_ssh_key(ctx.jump)
     return 0

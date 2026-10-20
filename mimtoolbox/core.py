@@ -55,6 +55,10 @@ def quiet(cmd: Sequence[str]) -> bool:
     return run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
 
 
+JUMP_HOST: str = "students.mimuw.edu.pl"
+"""The host that is reachable from outside and can reach the lab PCs."""
+
+
 class ConfigField(NamedTuple):
     """One setting in ~/.mimtoolbox.config, as offered by `mimtoolbox.py setup`."""
 
@@ -62,6 +66,12 @@ class ConfigField(NamedTuple):
     """Value used when the config file doesn't set it; None means the user must provide one."""
     prompt: str
     """Question asked by `setup`."""
+    platform: str | None = None
+    """`sys.platform` prefix (e.g. 'darwin', 'linux') the setting matters on; None = everywhere."""
+
+    def applies_here(self) -> bool:
+        """Whether the setting matters on this machine's platform."""
+        return self.platform is None or sys.platform.startswith(self.platform)
 
 
 @dataclass(frozen=True)
@@ -72,15 +82,13 @@ class Context:
     """Command name of the running tool; keeps its cache/state files and ssh masters apart."""
     lab_user: str
     """The user's MIMUW login, the same on students and on the lab PCs."""
-    jump_host: str
-    """Host that is reachable from outside and can reach the lab PCs (students)."""
     settings: Mapping[str, str]
     """The tool's own config section, with defaults filled in for keys the file doesn't set."""
 
     @property
     def jump(self) -> str:
-        """The jump host as an ssh destination (`user@host`)."""
-        return f"{self.lab_user}@{self.jump_host}"
+        """The jump host (students) as an ssh destination (`user@host`)."""
+        return f"{self.lab_user}@{JUMP_HOST}"
 
     @property
     def cache_dir(self) -> pathlib.Path:
@@ -183,16 +191,14 @@ def pick_pc_interactive(hosts: Sequence[str]) -> str:
             return choice
 
 
-def copy_ssh_key(target: str, ssh_opts: Sequence[str] = ()) -> None:
-    """Make key logins to `target` (`user@host`) work, running ssh-copy-id unless they already do.
+def key_login_works(target: str) -> bool:
+    """Whether ssh to `target` (`user@host`) gets in with a key, without asking for a password."""
+    return quiet(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=accept-new",
+                  target, "true"])
 
-    Args:
-        ssh_opts: Extra ssh options, e.g. a ProxyJump.
-    """
-    opts = [*ssh_opts, "-o", "StrictHostKeyChecking=accept-new"]
-    if quiet(["ssh", "-o", "BatchMode=yes", *opts, target, "true"]):
-        log(f"key already works for {target}")
-        return
+
+def copy_ssh_key(target: str) -> None:
+    """Add your SSH public key to `target`'s authorized_keys with ssh-copy-id (asks for the password)."""
     log(f"copying key to {target}")
-    if run(["ssh-copy-id", *opts, target], stdin=None).returncode != 0:
+    if run(["ssh-copy-id", "-o", "StrictHostKeyChecking=accept-new", target], stdin=None).returncode != 0:
         die(f"ssh-copy-id to {target} failed")

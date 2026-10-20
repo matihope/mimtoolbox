@@ -17,27 +17,33 @@ mimtoolbox.py <command> [options]
 ## `setup`: per-machine config
 
 `setup` asks for each setting and writes `~/.mimtoolbox.config` (to keep it somewhere else, set
-`MIMTOOLBOX_CONFIG`). Enter keeps the value in brackets and `-` clears an optional one. Afterwards it
-offers to set up SSH key login to `students`, so you don't have to type passwords. The lab PCs share
-your home directory with `students`, so the same key works there too.
+`MIMTOOLBOX_CONFIG`). Enter keeps the value in brackets and `-` clears an optional one. Afterwards, if
+SSH key login to `students` doesn't work yet, it offers to set it up so you don't have to type
+passwords. The lab PCs share your home directory with `students`, so the same key works there too.
 Run it again at any time to change a setting, or edit the file by hand:
 
 ```ini
 [common]
-lab_user = ab123456              # your MIMUW login (required)
-jump = students.mimuw.edu.pl     # the host that reaches the lab PCs
+# your MIMUW login (required)
+lab_user = ab123456
 
 [print]
-printer =                        # empty = the lab PC's default (drukarka_studencka)
+# empty = the lab PC's default (drukarka_studencka)
+printer =
 
 [lab-display]
 fps = 30
 bitrate = 8M
-hidpi = off                      # macOS: HiDPI virtual screen
-encoder =                        # Linux: GStreamer H.264 encoder, empty = best available
+# macOS only: HiDPI virtual screen
+hidpi = off
+# Linux only: GStreamer H.264 encoder, empty = best available
+encoder =
 ```
 
-Other commands refuse to run until `lab_user` is set. Command-line flags override the config.
+`setup` only asks about settings that apply to your OS: `hidpi` on macOS, `encoder` on Linux.
+Comments must be on their own lines; text after a value counts as part of the value. The other
+commands refuse to run until `lab_user` is set. Command-line flags override the config. All
+connections go through `students.mimuw.edu.pl`, which is built in.
 
 ## `print`: the student printer
 
@@ -205,7 +211,8 @@ def main(args: argparse.Namespace, ctx: Context) -> int | None:
 ```
 
 `mimtoolbox/core.py` has the shared helpers: `log`, `die`, `run` (with dry-run support), and the
-ssh helpers `lab_ssh`, `lab_ssh_opts`, `close_master`, `booted_pcs`, `pick_pc_interactive` and
-`copy_ssh_key`. `Context` carries `lab_user`, `jump`, the tool's `settings`, `cache_dir` and
-`state_dir`. Use type hints and docstrings. Check the code with
+ssh helpers `lab_ssh`, `lab_ssh_opts`, `close_master`, `booted_pcs`, `pick_pc_interactive`,
+`key_login_works` and `copy_ssh_key`. `Context` carries `lab_user`, `jump`
+(`user@students.mimuw.edu.pl`), the tool's `settings`, `cache_dir` and `state_dir`. Use type hints
+and docstrings. Check the code with
 `mypy --strict mimtoolbox`.
