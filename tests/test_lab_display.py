@@ -12,9 +12,14 @@ from mimtoolbox.tools import lab_display
 from tests.support import IsolatedTestCase, completed, make_ctx, parse
 
 
-def stream(res: str = "1920x1080", encoder: str = "") -> lab_display.Stream:
-    """Video settings with the config defaults."""
-    return lab_display.Stream(res, "30", "8M", "off", encoder)
+def stream(res: str = "1920x1080", encoder: str = "", priority: str = "latency") -> lab_display.Stream:
+    """Video settings with the priority's preset fps and bitrate."""
+    preset = lab_display.PRESETS[priority]
+    return lab_display.Stream(res, preset.fps, preset.bitrate, "off", encoder, priority)
+
+
+ENCODERS_WITH_X264 = " V....D libx264              libx264 H.264\n V....D h264_videotoolbox    VideoToolbox\n"
+ENCODERS_WITHOUT_X264 = " V....D h264_videotoolbox    VideoToolbox\n"
 
 
 class HelpersTest(IsolatedTestCase):
@@ -45,7 +50,65 @@ class HelpersTest(IsolatedTestCase):
     def test_config_platforms(self) -> None:
         """hidpi is a macOS setting, encoder a Linux one, the rest apply everywhere."""
         platforms = {key: field.platform for key, field in lab_display.CONFIG.items()}
-        self.assertEqual(platforms, {"fps": None, "bitrate": None, "hidpi": "darwin", "encoder": "linux"})
+        self.assertEqual(platforms, {"priority": None, "fps": None, "bitrate": None, "hidpi": "darwin",
+                                     "encoder": "linux"})
+
+
+class PriorityTest(IsolatedTestCase):
+    """Choosing between low latency and picture quality."""
+
+    DEFAULTS = {key: field.default or "" for key, field in lab_display.CONFIG.items()}
+
+    def settings(self, argv: Sequence[str], **config: str) -> tuple[str, str, str]:
+        """video_settings() for a command line and config values (on top of the defaults)."""
+        return lab_display.video_settings(parse(["lab-display", *argv]), {**self.DEFAULTS, **config})
+
+    def test_latency_is_default(self) -> None:
+        """Without options, the latency preset is used: 60 fps, 16M."""
+        self.assertEqual(self.settings([]), ("latency", "60", "16M"))
+
+    def test_quality_preset(self) -> None:
+        """--quality / --priority quality / the config switch to 30 fps, 12M."""
+        for argv, config in [(["--quality"], {}), (["--priority", "quality"], {}), ([], {"priority": "quality"})]:
+            with self.subTest(argv=argv, config=config):
+                self.assertEqual(self.settings(argv, **config), ("quality", "30", "12M"))
+
+    def test_command_line_beats_config(self) -> None:
+        """--latency overrides the config's priority."""
+        self.assertEqual(self.settings(["--latency"], priority="quality")[0], "latency")
+
+    def test_explicit_values_override_preset(self) -> None:
+        """fps and bitrate from the command line or config win over the preset."""
+        self.assertEqual(self.settings(["--fps", "45"], bitrate="20M"), ("latency", "45", "20M"))
+        self.assertEqual(self.settings(["--quality", "--bitrate", "4M"]), ("quality", "30", "4M"))
+
+    def test_bad_priority(self) -> None:
+        """An unknown priority in the config is reported."""
+        with self.assertExits(1):
+            self.settings([], priority="fast")
+        self.assertIn("bad priority: fast", self.stderr.getvalue())
+
+    def test_latency_and_quality_exclusive(self) -> None:
+        """--latency and --quality can't be combined."""
+        with self.assertExits(2):
+            parse(["lab-display", "--latency", "--quality"])
+
+    def test_mac_encoder_args(self) -> None:
+        """Latency uses x264 zerolatency (VideoToolbox if x264 is missing); quality uses VideoToolbox."""
+        latency = lab_display.mac_encoder_args(stream(), have_libx264=True)
+        self.assertEqual(latency[:6], ["-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency"])
+        self.assertIn("-bf", latency)
+        fallback = lab_display.mac_encoder_args(stream(), have_libx264=False)
+        self.assertEqual(fallback[:6], ["-c:v", "h264_videotoolbox", "-realtime", "1", "-prio_speed", "1"])
+        quality = lab_display.mac_encoder_args(stream(priority="quality"), have_libx264=True)
+        self.assertEqual(quality[:6], ["-c:v", "h264_videotoolbox", "-realtime", "1", "-prio_speed", "0"])
+        for args in (latency, fallback, quality):
+            self.assertEqual(args[args.index("-bf") + 1], "0")  # B-frames would add delay
+
+    def test_player_paces_by_video(self) -> None:
+        """ffplay shows frames as they arrive instead of slowing to an external clock."""
+        for opt in ("-sync video", "-fflags nobuffer", "-flags low_delay", "-framedrop"):
+            self.assertIn(opt, lab_display.PLAYER_OPTS)
 
 
 class BackendTest(IsolatedTestCase):
@@ -76,11 +139,25 @@ class BackendTest(IsolatedTestCase):
         self.assertIn("ffmpeg not found", self.stderr.getvalue())
 
     def test_mac_backend(self) -> None:
-        """With both installed, the macOS backend is used."""
+        """With both installed, the macOS backend is used, encoding with x264 for low latency."""
         self.patch("sys.platform", "darwin")
         self.patch("os.path.exists", return_value=True)
         self.patch("shutil.which", return_value="/usr/bin/ffmpeg")
-        self.assertIsInstance(lab_display.make_backend(make_ctx("lab-display"), stream()), lab_display.MacBackend)
+        self.patch("mimtoolbox.tools.lab_display.run", return_value=completed(stdout=ENCODERS_WITH_X264))
+        backend = lab_display.make_backend(make_ctx("lab-display"), stream())
+        assert isinstance(backend, lab_display.MacBackend)
+        self.assertEqual(backend.encoder_args[1], "libx264")
+
+    def test_mac_without_x264_falls_back(self) -> None:
+        """An ffmpeg without libx264 falls back to VideoToolbox, with a note about the extra delay."""
+        self.patch("sys.platform", "darwin")
+        self.patch("os.path.exists", return_value=True)
+        self.patch("shutil.which", return_value="/usr/bin/ffmpeg")
+        self.patch("mimtoolbox.tools.lab_display.run", return_value=completed(stdout=ENCODERS_WITHOUT_X264))
+        backend = lab_display.make_backend(make_ctx("lab-display"), stream())
+        assert isinstance(backend, lab_display.MacBackend)
+        self.assertEqual(backend.encoder_args[1], "h264_videotoolbox")
+        self.assertIn("no libx264", self.stderr.getvalue())
 
     def test_linux_needs_wayland(self) -> None:
         """On Linux, an X11 session is refused."""
@@ -91,11 +168,11 @@ class BackendTest(IsolatedTestCase):
         self.assertIn("needs a Wayland session", self.stderr.getvalue())
 
     def test_linux_encoder_choice(self) -> None:
-        """The first installed encoder is used, unless one is configured; unknown ones are refused."""
+        """The priority's first installed encoder is used, unless one is configured; unknown ones are refused."""
         self.patch("sys.platform", "linux")
         self.patch_dict(os.environ, {"WAYLAND_DISPLAY": "wayland-0"})
         self.patch("shutil.which", return_value="/usr/bin/gst")
-        installed = {"pipewiresrc", "x264enc", "openh264enc", "mystery264"}
+        installed = {"pipewiresrc", "x264enc", "vah264enc", "openh264enc", "mystery264"}
         self.patch("mimtoolbox.tools.lab_display.quiet", side_effect=lambda cmd: cmd[-1] in installed)
         self.patch_dict(sys.modules, {"gi": types.ModuleType("gi")})  # pretend PyGObject is installed
         ctx = make_ctx("lab-display")
@@ -103,6 +180,9 @@ class BackendTest(IsolatedTestCase):
         assert isinstance(backend, lab_display.PortalBackend)
         self.assertEqual(backend.encoder, "x264enc")
         self.assertEqual(backend.token_file, str(ctx.state_dir / "lab-display-restore-token"))
+        backend = lab_display.make_backend(ctx, stream(priority="quality"))
+        assert isinstance(backend, lab_display.PortalBackend)
+        self.assertEqual(backend.encoder, "vah264enc")
         backend = lab_display.make_backend(ctx, stream(encoder="openh264enc"))
         assert isinstance(backend, lab_display.PortalBackend)
         self.assertEqual(backend.encoder, "openh264enc")

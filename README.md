@@ -32,13 +32,20 @@ lab_user = ab123456
 printer =
 
 [lab-display]
-fps = 30
-bitrate = 8M
+# latency (default) or quality, see lab-display below
+priority = latency
+# empty = chosen by priority
+fps =
+bitrate =
 # macOS only: HiDPI virtual screen
 hidpi = off
-# Linux only: GStreamer H.264 encoder, empty = best available
+# Linux only: GStreamer H.264 encoder, empty = chosen by priority
 encoder =
 ```
+
+`setup` stores only values that differ from the defaults, so your file holds just your own choices.
+That way a better default in a later version reaches you too. The example above lists every
+setting with its default.
 
 `setup` only asks about settings that apply to your OS: `hidpi` on macOS, `encoder` on Linux.
 Comments must be on their own lines; text after a value counts as part of the value. The other
@@ -94,11 +101,25 @@ the stream ends.
    mimtoolbox.py lab-display                    # the PC where you're logged in, at its resolution
    mimtoolbox.py lab-display <pc>               # a specific PC
    mimtoolbox.py lab-display <pc> 1920x1080     # a fixed resolution
-   mimtoolbox.py lab-display --fps 60 --bitrate 12M
+   mimtoolbox.py lab-display --quality          # sharper picture, more delay
+   mimtoolbox.py lab-display --fps 30 --bitrate 8M
    ```
 
 3. Press Ctrl-C to stop. The virtual monitor and the remote player are cleaned up even if the
    process is killed.
+
+**Latency or quality.** `--latency` (the default) and `--quality` choose how the picture is encoded.
+You can also set `priority` in the config:
+
+| priority | settings | delay* | cost |
+|---|---|---|---|
+| `latency` | 60 fps, 16 Mbit/s, x264 on the CPU (`zerolatency`) | ~40–60 ms | about one CPU core |
+| `quality` | 30 fps, 12 Mbit/s, the hardware encoder (VideoToolbox / VA-API) | ~200 ms | almost no CPU, sharper |
+
+\* Measured from encoding on a Mac to `ffplay` on a lab PC over the faculty network, using a test
+pattern. Screen capture and the monitor itself add more on top. The hardware encoders hold back a
+few frames, which is where most of `quality`'s extra delay comes from. `--fps`, `--bitrate` and
+`--encoder` override what the priority chose.
 
 **How it finds your PC.** Every desktop login on a lab PC adds that PC to `~/.Xauthority`, which is
 in your home directory shared with `students`. So one call to `students` gives your login history
@@ -154,7 +175,7 @@ What each program is for:
 | an SSH key (`~/.ssh/id_ed25519` or similar) | passwordless logins set up by `setup` |
 | `fzf` *(optional)* | picking a lab PC from a fuzzy list; without it you get a numbered list |
 | [BetterDisplay](https://github.com/waydabber/BetterDisplay) with *CLI integration* enabled in its settings | `lab-display` on macOS: the virtual screen |
-| `ffmpeg` (with AVFoundation and VideoToolbox, as in Homebrew's build) | `lab-display` on macOS: capture and encoding |
+| `ffmpeg` (with AVFoundation, libx264 and VideoToolbox, as in Homebrew's build) | `lab-display` on macOS: capture and encoding |
 | GStreamer and PyGObject (table below) | `lab-display` on Linux |
 
 `print` needs nothing beyond the common programs.

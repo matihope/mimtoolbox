@@ -5,14 +5,20 @@ into a fullscreen ffplay on your logged-in desktop session on the lab PC. View-o
 this computer's keyboard/mouse, the lab monitor behaves like an extra screen.
 
 Local side:
-  macOS          BetterDisplay virtual screen -> ffmpeg (AVFoundation, VideoToolbox H.264)
-  Linux/Wayland  ScreenCast portal virtual monitor (GNOME) -> GStreamer (pipewiresrc, best H.264 encoder)
+  macOS          BetterDisplay virtual screen -> ffmpeg (AVFoundation; x264 or VideoToolbox H.264)
+  Linux/Wayland  ScreenCast portal virtual monitor (GNOME) -> GStreamer (pipewiresrc, H.264 encoder)
                  First run shows a "share screen" dialog; the restore token saved afterwards skips it.
+
+Priorities (--priority, or `priority` in the config):
+  latency  (default) 60 fps, 16M, x264 on the CPU (zerolatency): ~0.1 s less delay, ~1 CPU core
+  quality  30 fps, 12M, the hardware encoder (VideoToolbox / VA-API): sharper, lighter on the CPU
+--fps, --bitrate and --encoder override the priority's choices.
 
 Examples:
   mimtoolbox.py lab-display                  the PC where you're logged in, at its resolution
   mimtoolbox.py lab-display <pc> 1920x1080   stream to <pc> at a fixed resolution
-  mimtoolbox.py lab-display --fps 60 --bitrate 12M
+  mimtoolbox.py lab-display --quality        sharper picture, more delay
+  mimtoolbox.py lab-display --fps 30 --bitrate 8M
 
 You must already be logged in at the lab PC's desktop (in person, as lab_user): the player opens
 inside that session, found through a process of yours that has DISPLAY or WAYLAND_DISPLAY set.
@@ -47,10 +53,29 @@ from mimtoolbox.core import (ConfigField, Context, KnownPCs, close_master, deskt
 COMMAND: str = "lab-display"
 HELP: str = "Use a lab PC's monitor as an extra display."
 CONFIG: Mapping[str, ConfigField] = {
-    "fps": ConfigField("30", "frames per second"),
-    "bitrate": ConfigField("8M", "video bitrate (e.g. 8M, 4500k)"),
+    "priority": ConfigField("latency", "prioritise low latency or picture quality (latency/quality)"),
+    "fps": ConfigField("", "frames per second (empty = by priority: 60 for latency, 30 for quality)"),
+    "bitrate": ConfigField("", "video bitrate, e.g. 12M or 4500k (empty = by priority: 16M / 12M)"),
     "hidpi": ConfigField("off", "HiDPI virtual screen (on/off)", platform="darwin"),
     "encoder": ConfigField("", "GStreamer H.264 encoder element (empty = best available)", platform="linux"),
+}
+
+
+
+@dataclass(frozen=True)
+class Preset:
+    """Defaults for one `priority`."""
+
+    fps: str
+    bitrate: str
+    linux_encoders: tuple[str, ...]
+    """GStreamer encoders in order of preference (see PortalBackend.ENCODERS)."""
+
+
+PRESETS: Mapping[str, Preset] = {
+    # x264's zerolatency mode emits each frame right away; the hardware encoders hold ~2-3 frames.
+    "latency": Preset("60", "16M", ("x264enc", "vah264lpenc", "vah264enc", "openh264enc")),
+    "quality": Preset("30", "12M", ("vah264lpenc", "vah264enc", "x264enc", "openh264enc")),
 }
 
 SCREEN_NAME: str = "LabDisplay"
@@ -79,7 +104,9 @@ class Stream:
     hidpi: str
     """macOS: 'on' or 'off'."""
     encoder: str
-    """Linux: GStreamer element; empty = first installed one of PortalBackend.ENCODERS."""
+    """Linux: GStreamer element; empty = the priority's first installed one."""
+    priority: str = "latency"
+    """A key of PRESETS."""
 
     @property
     def width(self) -> str:
@@ -116,6 +143,23 @@ def bits_per_second(rate: str) -> int:
     return int(float(m.group(1)) * {"": 1, "k": 1e3, "m": 1e6}[m.group(2).lower()])
 
 
+def mac_encoder_args(s: Stream, have_libx264: bool) -> list[str]:
+    """ffmpeg encoder options for the stream: x264 for low latency (if available), else VideoToolbox."""
+    rate = ["-b:v", s.bitrate, "-maxrate", s.bitrate, "-g", s.fps, "-bf", "0"]
+    if s.priority == "latency" and have_libx264:
+        return ["-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", *rate, "-bufsize", s.bitrate]
+    speed = "1" if s.priority == "latency" else "0"
+    return ["-c:v", "h264_videotoolbox", "-realtime", "1", "-prio_speed", speed, *rate, "-profile:v", "high"]
+
+
+# Send each packet at once, without the muxer's default 0.7 s timestamp offset.
+LOW_DELAY_MUX: list[str] = ["-flush_packets", "1", "-muxdelay", "0", "-muxpreload", "0"]
+
+# ffplay options for showing frames as soon as they arrive; with -sync video, ffplay paces by the
+# video itself rather than an external clock that slows playback down when few frames are queued.
+PLAYER_OPTS: str = ("-fflags nobuffer -flags low_delay -framedrop -sync video -probesize 32 -analyzeduration 0")
+
+
 def remote_cleanup_cmd() -> str:
     """Shell command that stops our ffplay on the lab PC."""
     return f"pkill -u \"$USER\" -f 'window_title {SCREEN_NAME}'"
@@ -128,13 +172,17 @@ class MacBackend:
     hint: str = "if the lab screen stays black, grant Screen Recording to your terminal in System Settings"
 
     def __init__(self, stream: Stream) -> None:
-        """Check that BetterDisplay and ffmpeg are installed."""
+        """Check that BetterDisplay and ffmpeg are installed, and pick the encoder."""
         self.stream = stream
         self.before: set[str] = set()
         if not os.path.exists(self.BD):
             die("BetterDisplay is not installed")
         if not shutil.which("ffmpeg"):
             die("ffmpeg not found (brew install ffmpeg)")
+        have_libx264 = " libx264 " in run(["ffmpeg", "-hide_banner", "-encoders"], capture_output=True).stdout
+        if stream.priority == "latency" and not have_libx264:
+            log("this ffmpeg has no libx264; using VideoToolbox, which adds ~0.1 s of delay")
+        self.encoder_args = mac_encoder_args(stream, have_libx264)
 
     def bd(self, *args: str) -> bool:
         """Run a BetterDisplay CLI command; tell whether it succeeded."""
@@ -180,15 +228,13 @@ class MacBackend:
         if idx is None:
             die("virtual screen did not show up as an AVFoundation capture device")
         self.bd("set", f"-nameLike={SCREEN_NAME}", f"-resolution={s.res}")
-        log(f"capturing AVFoundation device {idx} ({s.res} @ {s.fps}fps, {s.bitrate})")
+        log(f"capturing AVFoundation device {idx} ({s.res} @ {s.fps}fps, {s.bitrate}, {self.encoder_args[1]})")
         return subprocess.Popen(
             ["ffmpeg", "-hide_banner", "-loglevel", "warning", "-nostdin",
              "-f", "avfoundation", "-capture_cursor", "1", "-framerate", s.fps, "-pixel_format", "nv12",
              "-i", f"{idx}:none",
              "-vf", f"scale={s.width}:{s.height},format=nv12",
-             "-c:v", "h264_videotoolbox", "-realtime", "1", "-prio_speed", "1",
-             "-b:v", s.bitrate, "-maxrate", s.bitrate, "-g", s.fps, "-bf", "0", "-profile:v", "high",
-             "-f", "mpegts", "-"],
+             *self.encoder_args, *LOW_DELAY_MUX, "-f", "mpegts", "-"],
             stdout=subprocess.PIPE)
 
     def cleanup(self) -> None:
@@ -209,7 +255,7 @@ class PortalBackend:
     VIRTUAL, CURSOR_EMBEDDED, PERSIST_UNTIL_REVOKED = 4, 2, 2
     hint: str = "move windows to the new monitor (arrange it in Settings > Displays)"
 
-    # element -> (input format, properties); first one installed wins
+    # element -> (input format, properties); the order of preference is in PRESETS
     ENCODERS: Mapping[str, tuple[str, str]] = {
         "vah264lpenc": ("NV12", "bitrate={kbps} key-int-max={fps} b-frames=0 rate-control=cbr target-usage=7"),
         "vah264enc": ("NV12", "bitrate={kbps} key-int-max={fps} b-frames=0 rate-control=cbr target-usage=7"),
@@ -232,7 +278,7 @@ class PortalBackend:
                 die(f"{tool} not found (install gstreamer)")
         if not quiet(["gst-inspect-1.0", "--exists", "pipewiresrc"]):
             die("GStreamer pipewiresrc missing (install gst-plugin-pipewire)")
-        names = [stream.encoder] if stream.encoder else list(self.ENCODERS)
+        names = [stream.encoder] if stream.encoder else list(PRESETS[stream.priority].linux_encoders)
         encoder = next((e for e in names if quiet(["gst-inspect-1.0", "--exists", e])), None)
         if not encoder:
             die(f"no usable H.264 encoder among {', '.join(names)} "
@@ -465,19 +511,37 @@ def add_arguments(ap: argparse.ArgumentParser) -> None:
     """Register the lab-display options on the subparser."""
     ap.add_argument("host", nargs="?", help="lab PC (default: the one where you're logged in at the desktop)")
     ap.add_argument("res", nargs="?", help="WxH (default: the lab PC's current resolution)")
-    ap.add_argument("--fps", help="frames per second (config: fps)")
-    ap.add_argument("--bitrate", help="video bitrate, e.g. 8M (config: bitrate)")
+    g = ap.add_mutually_exclusive_group()
+    g.add_argument("--priority", choices=PRESETS, help="low latency or picture quality (config: priority, "
+                   "default latency)")
+    g.add_argument("--latency", dest="priority", action="store_const", const="latency",
+                   help="same as --priority latency")
+    g.add_argument("--quality", dest="priority", action="store_const", const="quality",
+                   help="same as --priority quality")
+    ap.add_argument("--fps", help="frames per second (config: fps; default by priority)")
+    ap.add_argument("--bitrate", help="video bitrate, e.g. 12M (config: bitrate; default by priority)")
     ap.add_argument("--hidpi", choices=["on", "off"], help="macOS: HiDPI virtual screen (config: hidpi)")
     ap.add_argument("--encoder", help="Linux: GStreamer H.264 encoder element (config: encoder)")
+
+
+def video_settings(args: argparse.Namespace, cfg: Mapping[str, str]) -> tuple[str, str, str]:
+    """Priority, fps and bitrate: command line, else config, else the priority's preset. Exits if invalid."""
+    priority = args.priority or cfg["priority"]
+    if priority not in PRESETS:
+        die(f"bad priority: {priority} (choose {' or '.join(PRESETS)})")
+    preset = PRESETS[priority]
+    fps = args.fps or cfg["fps"] or preset.fps
+    bitrate = args.bitrate or cfg["bitrate"] or preset.bitrate
+    if not fps.isdigit() or int(fps) < 1:
+        die(f"bad fps: {fps}")
+    bits_per_second(bitrate)
+    return priority, fps, bitrate
 
 
 def main(args: argparse.Namespace, ctx: Context) -> int | None:
     """Stream a local virtual monitor to the lab PC until Ctrl-C or until the stream ends."""
     cfg = ctx.settings
-    fps, bitrate = args.fps or cfg["fps"], args.bitrate or cfg["bitrate"]
-    if not fps.isdigit() or int(fps) < 1:
-        die(f"bad fps: {fps}")
-    bits_per_second(bitrate)
+    priority, fps, bitrate = video_settings(args, cfg)
 
     # --- Find the lab PC and the environment of your desktop session there ---
     if args.host:
@@ -507,7 +571,7 @@ def main(args: argparse.Namespace, ctx: Context) -> int | None:
         die(f"bad resolution: {size}")
     log(f"lab resolution: {size}")
 
-    stream = Stream(size, fps, bitrate, args.hidpi or cfg["hidpi"], args.encoder or cfg["encoder"])
+    stream = Stream(size, fps, bitrate, args.hidpi or cfg["hidpi"], args.encoder or cfg["encoder"], priority)
     backend = make_backend(ctx, stream)
     backend.prepare()
     run(ssh + [remote_cleanup_cmd()])
@@ -529,8 +593,7 @@ def main(args: argparse.Namespace, ctx: Context) -> int | None:
         capture_out: IO[bytes] | None = capture.stdout
         player = subprocess.Popen(
             ssh + [f"{remote_env} ffplay -hide_banner -loglevel error -fs -noborder -an -autoexit "
-                   f"-fflags nobuffer -flags low_delay -framedrop -probesize 32 -analyzeduration 0 "
-                   f"-window_title {SCREEN_NAME} -i -"],
+                   f"{PLAYER_OPTS} -window_title {SCREEN_NAME} -i -"],
             stdin=capture_out)
         if capture_out:
             capture_out.close()

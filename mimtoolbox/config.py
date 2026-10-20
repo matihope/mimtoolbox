@@ -100,8 +100,9 @@ def _yes(prompt: str) -> bool:
 def setup(tools: Sequence[Tool]) -> int:
     """Interactively fill in the config file, then offer to set up SSH key logins.
 
-    Settings for another platform (e.g. macOS-only ones on Linux) are neither asked for nor written;
-    values already in the file are kept. Keys that no setting defines (any more) are removed.
+    Only values that differ from the default are stored, so a changed default reaches existing
+    configs. Settings for another platform (e.g. macOS-only ones on Linux) are neither asked for nor
+    written; values already in the file are kept. Keys that no setting defines (any more) are removed.
 
     Returns:
         The exit status.
@@ -122,7 +123,13 @@ def setup(tools: Sequence[Tool]) -> int:
         if not cp.has_section(section):
             cp.add_section(section)
         for key, field in fields.items():
-            cp.set(section, key, _ask(field, current[key]))
+            value = _ask(field, current[key])
+            if value == field.default:  # not stored, so a changed default applies
+                cp.remove_option(section, key)
+            else:
+                cp.set(section, key, value)
+        if not cp.options(section):
+            cp.remove_section(section)
     save(cp)
 
     ctx = common_context(cp)

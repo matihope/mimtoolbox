@@ -124,49 +124,57 @@ class SetupTest(IsolatedTestCase):
         cp = config.load()
         return {s: dict(cp[s]) for s in cp.sections()}
 
+    # On macOS, after lab_user: lab-display's priority, fps, bitrate, hidpi, then print's printer.
+    OTHERS = 5
+
     def test_fresh_setup_on_macos(self) -> None:
-        """Asks lab_user and the macOS settings (not the Linux encoder), and writes them."""
-        prompts = self.run_setup("xy123", "", "", "", "")
-        self.assertEqual(len(prompts), 5)
+        """Asks lab_user and the macOS settings (not the Linux encoder); defaults aren't stored."""
+        prompts = self.run_setup("xy123", *[""] * self.OTHERS)
+        self.assertEqual(len(prompts), 1 + self.OTHERS)
         self.assertTrue(any("HiDPI" in p for p in prompts))
         self.assertFalse(any("GStreamer" in p for p in prompts))
-        self.assertEqual(self.saved(), {
-            "common": {"lab_user": "xy123"},
-            "lab-display": {"fps": "30", "bitrate": "8M", "hidpi": "off"},
-            "print": {"printer": ""}})
+        self.assertEqual(self.saved(), {"common": {"lab_user": "xy123"}})
+
+    def test_only_non_defaults_stored(self) -> None:
+        """A value that differs from the default is stored; one equal to it is removed."""
+        self.write_config("[common]\nlab_user = xy123\n[lab-display]\nfps = 30\nhidpi = off\n")
+        self.run_setup("", "quality", "", "", "on", "")
+        self.assertEqual(self.saved(), {"common": {"lab_user": "xy123"},
+                                        "lab-display": {"priority": "quality", "fps": "30", "hidpi": "on"}})
+        self.run_setup("", "latency", "-", "", "off", "")
+        self.assertEqual(self.saved(), {"common": {"lab_user": "xy123"}})
 
     def test_linux_asks_encoder_not_hidpi(self) -> None:
         """On Linux the macOS-only setting is skipped and the Linux one asked."""
         self.patch("sys.platform", "linux")
-        prompts = self.run_setup("xy123", "", "", "x264enc", "")
+        prompts = self.run_setup("xy123", "", "", "", "x264enc", "")
         self.assertFalse(any("HiDPI" in p for p in prompts))
-        self.assertEqual(self.saved()["lab-display"]["encoder"], "x264enc")
+        self.assertTrue(any("GStreamer" in p for p in prompts))
+        self.assertEqual(self.saved()["lab-display"], {"encoder": "x264enc"})
 
     def test_lab_user_is_required(self) -> None:
         """An empty lab_user is asked again."""
-        prompts = self.run_setup("", "xy123", "", "", "", "")
+        prompts = self.run_setup("", "xy123", *[""] * self.OTHERS)
         self.assertEqual(sum("MIMUW login" in p for p in prompts), 2)
         self.assertEqual(self.saved()["common"]["lab_user"], "xy123")
 
     def test_enter_keeps_and_dash_clears(self) -> None:
         """Enter keeps the current value (shown in brackets), `-` clears an optional one."""
         self.write_config("[common]\nlab_user = xy123\n[print]\nprinter = drk\n[lab-display]\nfps = 60\n")
-        prompts = self.run_setup("", "", "", "", "-")
+        prompts = self.run_setup("", "", "", "", "", "-")
         self.assertIn("[xy123]", prompts[0])
-        self.assertEqual(self.saved()["lab-display"]["fps"], "60")
-        self.assertEqual(self.saved()["print"]["printer"], "")
+        self.assertTrue(any("[60]" in p for p in prompts))
+        self.assertEqual(self.saved(), {"common": {"lab_user": "xy123"}, "lab-display": {"fps": "60"}})
 
     def test_keeps_other_platform_values_drops_unknown_keys(self) -> None:
         """A Linux-only value survives setup on macOS; keys no setting defines are removed."""
         self.write_config("[common]\nlab_user = xy123\njump = old.example\n[lab-display]\nencoder = x264enc\n")
-        self.run_setup("", "", "", "", "")
-        saved = self.saved()
-        self.assertNotIn("jump", saved["common"])
-        self.assertEqual(saved["lab-display"]["encoder"], "x264enc")
+        self.run_setup(*[""] * (1 + self.OTHERS))
+        self.assertEqual(self.saved(), {"common": {"lab_user": "xy123"}, "lab-display": {"encoder": "x264enc"}})
 
     def test_skips_key_question_when_key_works(self) -> None:
         """No key question when key login to students already works."""
-        prompts = self.run_setup("xy123", "", "", "", "")
+        prompts = self.run_setup("xy123", *[""] * self.OTHERS)
         self.assertFalse(any("SSH key" in p for p in prompts))
         self.key_works.assert_called_once_with("xy123@students.mimuw.edu.pl")
         self.assertIn("already works", self.stderr.getvalue())
@@ -174,10 +182,10 @@ class SetupTest(IsolatedTestCase):
     def test_offers_key_copy_when_needed(self) -> None:
         """Without key login, setup offers to copy the key; 'y' runs ssh-copy-id, Enter skips it."""
         self.key_works.return_value = False
-        self.run_setup("xy123", "", "", "", "", "y")
+        self.run_setup("xy123", *[""] * self.OTHERS, "y")
         self.copy_key.assert_called_once_with("xy123@students.mimuw.edu.pl")
         self.copy_key.reset_mock()
-        self.run_setup("", "", "", "", "", "")
+        self.run_setup(*[""] * (1 + self.OTHERS), "")
         self.copy_key.assert_not_called()
 
     def test_eof_aborts_without_writing(self) -> None:
