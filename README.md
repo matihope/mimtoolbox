@@ -1,6 +1,6 @@
-# mim-toolbox
+# MIM Toolbox
 
-Tools for using the MIMUW lab computers from your own machine, behind one command:
+Tools for using the computer infrastructure at MIMUW from your own machine, behind one command:
 
 ```
 mimtoolbox.py <command> [options]
