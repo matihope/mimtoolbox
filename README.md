@@ -18,7 +18,8 @@ mimtoolbox.py <command> [options]
 
 `setup` asks for each setting and writes `~/.mimtoolbox.config` (to keep it somewhere else, set
 `MIMTOOLBOX_CONFIG`). Enter keeps the value in brackets and `-` clears an optional one. Afterwards it
-offers to set up SSH key login to `students` and to a lab PC, so you don't have to type passwords.
+offers to set up SSH key login to `students`, so you don't have to type passwords. The lab PCs share
+your home directory with `students`, so the same key works there too.
 Run it again at any time to change a setting, or edit the file by hand:
 
 ```ini

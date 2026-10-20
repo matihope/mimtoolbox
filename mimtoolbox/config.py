@@ -7,7 +7,7 @@ import os
 import pathlib
 from typing import Mapping, Sequence
 
-from mimtoolbox.core import ConfigField, Context, Tool, booted_pcs, copy_ssh_key, die, log, pick_pc_interactive
+from mimtoolbox.core import ConfigField, Context, Tool, copy_ssh_key, die, log
 
 COMMON_SECTION: str = "common"
 COMMON: Mapping[str, ConfigField] = {
@@ -118,9 +118,7 @@ def setup(tools: Sequence[Tool]) -> int:
     save(cp)
 
     ctx = common_context(cp)
-    if _yes(f"Set up SSH key login to {ctx.jump}?"):
+    # The lab PCs share /home (and so ~/.ssh/authorized_keys) with the jump host, so this covers them too.
+    if _yes(f"Set up SSH key login to {ctx.jump} and the lab PCs?"):
         copy_ssh_key(ctx.jump)
-    if _yes("Also to a lab PC (needed if lab PCs don't accept the same key)?"):
-        host = _input("  lab PC (empty = choose from the booted ones): ") or pick_pc_interactive(booted_pcs(ctx))
-        copy_ssh_key(f"{ctx.lab_user}@{host}", ["-o", f"ProxyJump={ctx.jump}"])
     return 0
