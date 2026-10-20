@@ -222,6 +222,29 @@ def main(args: argparse.Namespace, ctx: Context) -> int | None:
 `mimtoolbox/core.py` has the shared helpers: `log`, `die`, `run` (with dry-run support), and the
 ssh helpers `lab_ssh`, `lab_ssh_opts`, `close_master`, `booted_pcs`, `pick_pc_interactive`,
 `key_login_works` and `copy_ssh_key`. `Context` carries `lab_user`, `jump`
-(`user@students.mimuw.edu.pl`), the tool's `settings`, `cache_dir` and `state_dir`. Use type hints
-and docstrings. Check the code with
-`mypy --strict mimtoolbox`.
+(`user@students.mimuw.edu.pl`), the tool's `settings`, `cache_dir` and `state_dir`.
+
+Add `tests/test_<tool>.py` for the new tool, and add its command to the list in
+`tests/test_cli.py` (`test_finds_all_tools`).
+
+## Tests
+
+Run these from the repository root:
+
+```sh
+python3 -m unittest        # add -v to see each test's description
+```
+
+The suite uses only the standard library and runs in well under a second. It never starts real
+processes: any attempt to run `ssh`, `scp` or `lp` fails the test. `HOME`, the config file and the
+cache are redirected to a temporary directory, so running it doesn't touch the lab, the printer or
+your own settings.
+
+`tests/test_style.py` checks that every module, class and function, including the tests, has a
+docstring and type hints. To check that the hints are correct, run
+[mypy](https://mypy-lang.org) (needs Python 3.10+):
+
+```sh
+python3 -m venv /tmp/mypy-venv && /tmp/mypy-venv/bin/pip install mypy
+/tmp/mypy-venv/bin/mypy --strict mimtoolbox tests
+```
