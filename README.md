@@ -84,7 +84,7 @@ Printer defaults: A4, grayscale, two-sided long edge. Use `-H <pc>` to print fro
 ## `lab-display`: a lab monitor as an extra screen
 
 This creates a virtual monitor on your computer and streams it as H.264 over ssh to a fullscreen
-`ffplay` in your desktop session on the lab PC. It is view-only: you keep using your own keyboard
+player (mpv, or `ffplay` if mpv isn't installed) in your desktop session on the lab PC. It is view-only: you keep using your own keyboard
 and mouse, and the lab monitor acts as an extra screen.
 
 **You must already be logged in on the lab PC's desktop, in person, with the same `lab_user`.**
@@ -113,13 +113,18 @@ You can also set `priority` in the config:
 
 | priority | settings | delay* | cost |
 |---|---|---|---|
-| `latency` | 60 fps, 16 Mbit/s, x264 on the CPU (`zerolatency`) | ~40–60 ms | about one CPU core |
+| `latency` | 60 fps, 16 Mbit/s, x264 on the CPU (`zerolatency`) | ~30 ms | about one CPU core |
 | `quality` | 30 fps, 12 Mbit/s, the hardware encoder (VideoToolbox / VA-API) | ~200 ms | almost no CPU, sharper |
 
-\* Measured from encoding on a Mac to `ffplay` on a lab PC over the faculty network, using a test
-pattern. Screen capture and the monitor itself add more on top. The hardware encoders hold back a
-few frames, which is where most of `quality`'s extra delay comes from. `--fps`, `--bitrate` and
-`--encoder` override what the priority chose.
+\* Measured with a test pattern, from encoding on a Mac to the player on a lab PC, over the
+faculty network. Screen capture and the monitor itself add more on top. The hardware encoders hold
+back a few frames, which is where most of `quality`'s extra delay comes from. `--fps`, `--bitrate`
+and `--encoder` override what the priority chose.
+
+**Player.** On the lab PC, lab-display uses mpv in its low-latency, untimed mode, which shows each
+frame as soon as it's decoded: about 28 ms in the test above, against 40–80 ms with occasional
+stalls for `ffplay`, which paces frames and checks for new ones only every 10 ms. If mpv isn't
+installed it falls back to `ffplay`; `--player ffplay` forces that.
 
 **How it finds your PC.** Every desktop login on a lab PC adds that PC to `~/.Xauthority`, which is
 in your home directory shared with `students`. So one call to `students` gives your login history
@@ -199,8 +204,8 @@ used.
 **On the MIMUW side**, which you don't install yourself but the tools rely on:
 
 - On `students`: the `lk_booted_pcs` command, plus `lk_print_quota` for `print --quota`.
-- On the lab PCs: `lp`, `lpstat` and `lpoptions` for `print`; `ffplay`, `bash`, `pgrep`/`pkill` and
-  `xrandr` for `lab-display`. `xrandr` only detects the resolution; without it you get 1920x1080.
+- On the lab PCs: `lp`, `lpstat` and `lpoptions` for `print`; `mpv` (or `ffplay`), `bash`,
+  `pgrep`/`pkill` and `xrandr` for `lab-display`. `xrandr` only detects the resolution; without it you get 1920x1080.
 
 ## Install
 

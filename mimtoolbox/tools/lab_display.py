@@ -10,9 +10,10 @@ Local side:
                  First run shows a "share screen" dialog; the restore token saved afterwards skips it.
 
 Priorities (--priority, or `priority` in the config):
-  latency  (default) 60 fps, 16M, x264 on the CPU (zerolatency): ~0.1 s less delay, ~1 CPU core
+  latency  (default) 60 fps, 16M, x264 on the CPU (zerolatency): ~0.15 s less delay, ~1 CPU core
   quality  30 fps, 12M, the hardware encoder (VideoToolbox / VA-API): sharper, lighter on the CPU
---fps, --bitrate and --encoder override the priority's choices.
+--fps, --bitrate and --encoder override the priority's choices. On the lab PC the stream is played
+with mpv if it's installed (it shows each frame as soon as it's decoded), else ffplay; see --player.
 
 Examples:
   mimtoolbox.py lab-display                  the PC where you're logged in, at its resolution
@@ -158,14 +159,30 @@ def mac_encoder_args(s: Stream, have_libx264: bool) -> list[str]:
 # Send each packet at once, without the muxer's default 0.7 s timestamp offset.
 LOW_DELAY_MUX: list[str] = ["-flush_packets", "1", "-muxdelay", "0", "-muxpreload", "0"]
 
-# ffplay options for showing frames as soon as they arrive; with -sync video, ffplay paces by the
-# video itself rather than an external clock that slows playback down when few frames are queued.
-PLAYER_OPTS: str = ("-fflags nobuffer -flags low_delay -framedrop -sync video -probesize 32 -analyzeduration 0")
+PLAYERS: tuple[str, ...] = ("mpv", "ffplay")
+"""Players for the lab PC, preferred first. Measured headless on a lab PC with the same stream, mpv
+(--untimed: each frame is shown as soon as it's decoded) took ~28 ms, ffplay (which paces frames and
+polls every 10 ms) ~40-80 ms with occasional stalls."""
+
+
+def player_cmd(player: str) -> str:
+    """The shell command that plays the stream from stdin fullscreen on the lab PC, titled SCREEN_NAME."""
+    if player == "mpv":
+        return (f"mpv --profile=low-latency --untimed --no-cache --fs --no-border --osc=no --cursor-autohide=always "
+                f"--no-audio --input-terminal=no --msg-level=all=error --title={SCREEN_NAME} -")
+    # -sync video: pace by the video itself, not an external clock that slows playback down when
+    # few frames are queued (always the case for a live stream).
+    return (f"ffplay -hide_banner -loglevel error -fs -noborder -an -autoexit -fflags nobuffer -flags low_delay "
+            f"-framedrop -sync video -probesize 32 -analyzeduration 0 -window_title {SCREEN_NAME} -i -")
 
 
 def remote_cleanup_cmd() -> str:
-    """Shell command that stops our ffplay on the lab PC."""
-    return f"pkill -u \"$USER\" -f 'window_title {SCREEN_NAME}'"
+    """Shell command that stops our player on the lab PC.
+
+    The pattern matches the players' `--title=LabDisplay` / `-window_title LabDisplay` but not
+    itself, so the shell running it doesn't kill itself too.
+    """
+    return f"pkill -u \"$USER\" -f 'title[= ]{SCREEN_NAME}'"
 
 
 class MacBackend:
@@ -547,6 +564,20 @@ def find_desktop(ctx: Context) -> tuple[str, list[str]]:
     return host, found[host]
 
 
+def find_player(ctx: Context, host: str, wanted: str | None = None) -> str:
+    """The player to use on the lab PC: `wanted`, else the first of PLAYERS that is installed there.
+
+    Exits if it isn't installed.
+    """
+    candidates = [wanted] if wanted else list(PLAYERS)
+    found = run(lab_ssh(ctx, host) + [" ".join(f"command -v {shlex.quote(p)};" for p in candidates)],
+                capture_output=True).stdout
+    player = next((p for p in candidates if f"/{p}\n" in found), None)
+    if not player:
+        die(f"{' or '.join(candidates)} not found on {host}")
+    return player
+
+
 def add_arguments(ap: argparse.ArgumentParser) -> None:
     """Register the lab-display options on the subparser."""
     ap.add_argument("host", nargs="?", help="lab PC (default: the one where you're logged in at the desktop)")
@@ -558,6 +589,7 @@ def add_arguments(ap: argparse.ArgumentParser) -> None:
                    help="same as --priority latency")
     g.add_argument("--quality", dest="priority", action="store_const", const="quality",
                    help="same as --priority quality")
+    ap.add_argument("--player", choices=PLAYERS, help="player on the lab PC (default: mpv if installed, else ffplay)")
     ap.add_argument("--fps", help="frames per second (config: fps; default by priority)")
     ap.add_argument("--bitrate", help="video bitrate, e.g. 12M (config: bitrate; default by priority)")
     ap.add_argument("--hidpi", choices=["on", "off"], help="macOS: HiDPI virtual screen (config: hidpi)")
@@ -599,8 +631,7 @@ def main(args: argparse.Namespace, ctx: Context) -> int | None:
     remote_env = "env " + " ".join(shlex.quote(kv) for kv in session_env)
     log(f"session: {' '.join(session_env)}")
 
-    if run(ssh + ["command -v ffplay >/dev/null"]).returncode != 0:
-        die(f"ffplay not found on {host}")
+    player = find_player(ctx, host, args.player)
 
     size: str | None = args.res
     if not size:
@@ -631,14 +662,12 @@ def main(args: argparse.Namespace, ctx: Context) -> int | None:
         procs.append(capture)
         guardian.send(f"pid {capture.pid}")
         capture_out: IO[bytes] | None = capture.stdout
-        player = subprocess.Popen(
-            ssh + [f"{remote_env} ffplay -hide_banner -loglevel error -fs -noborder -an -autoexit "
-                   f"{PLAYER_OPTS} -window_title {SCREEN_NAME} -i -"],
-            stdin=capture_out)
+        log(f"playing with {player} on {host}")
+        player_proc = subprocess.Popen(ssh + [f"{remote_env} {player_cmd(player)}"], stdin=capture_out)
         if capture_out:
             capture_out.close()
-        procs.append(player)
-        guardian.send(f"pid {player.pid}")
+        procs.append(player_proc)
+        guardian.send(f"pid {player_proc.pid}")
         log(f"streaming to {host} - Ctrl-C to stop ({backend.hint})")
 
         while all(p.poll() is None for p in procs):

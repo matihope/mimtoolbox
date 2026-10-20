@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import signal
 import sys
 import time
@@ -45,9 +46,14 @@ class HelpersTest(IsolatedTestCase):
         self.assertEqual((s.width, s.height), ("2560", "1440"))
 
     def test_remote_cleanup_targets_our_player_only(self) -> None:
-        """Cleanup on the lab PC only kills our own ffplay window."""
-        self.assertIn("window_title LabDisplay", lab_display.remote_cleanup_cmd())
-        self.assertIn('-u "$USER"', lab_display.remote_cleanup_cmd())
+        """Cleanup on the lab PC kills our player (mpv or ffplay), but not other windows or itself."""
+        cmd = lab_display.remote_cleanup_cmd()
+        self.assertIn('-u "$USER"', cmd)
+        pattern = re.compile(cmd.split("-f ")[1].strip("'"))
+        for player in lab_display.PLAYERS:
+            self.assertTrue(pattern.search(lab_display.player_cmd(player)), player)
+        self.assertIsNone(pattern.search(cmd), "the pattern would match (and kill) the shell running it")
+        self.assertIsNone(pattern.search("mpv --title=Other video.mkv"))
 
     def test_config_platforms(self) -> None:
         """hidpi is a macOS setting, encoder a Linux one, the rest apply everywhere."""
@@ -118,10 +124,14 @@ class PriorityTest(IsolatedTestCase):
         args = lab_display.mac_encoder_args(lab_display.Stream("1920x1080", "45", "8M", "off", "", "latency"), True)
         self.assertEqual(args[args.index("-x264-params") + 1], "fps=45")
 
-    def test_player_paces_by_video(self) -> None:
-        """ffplay shows frames as they arrive instead of slowing to an external clock."""
-        for opt in ("-sync video", "-fflags nobuffer", "-flags low_delay", "-framedrop"):
-            self.assertIn(opt, lab_display.PLAYER_OPTS)
+    def test_players_show_frames_immediately(self) -> None:
+        """mpv shows frames untimed; ffplay paces by the video instead of slowing to an external clock."""
+        mpv = lab_display.player_cmd("mpv")
+        for opt in ("--profile=low-latency", "--untimed", "--fs", "--input-terminal=no", " -"):
+            self.assertIn(opt, mpv)
+        ffplay = lab_display.player_cmd("ffplay")
+        for opt in ("-sync video", "-fflags nobuffer", "-flags low_delay", "-framedrop", "-i -"):
+            self.assertIn(opt, ffplay)
 
 
 class BackendTest(IsolatedTestCase):
@@ -301,12 +311,28 @@ class MainTest(IsolatedTestCase):
         """Without a PC name the detected one is used, and remembered for print (it takes the key)."""
         self.find.side_effect = None
         self.find.return_value = ("white02", ["DISPLAY=:0"])
-        run = self.patch("mimtoolbox.tools.lab_display.run", return_value=completed(1))  # no ffplay: stop there
+        run = self.patch("mimtoolbox.tools.lab_display.run", return_value=completed(1))  # no player: stop there
         with self.assertExits(1):
             self.run_main([])
-        self.assertIn("ffplay not found on white02", self.stderr.getvalue())
-        self.assertEqual(run.call_args.args[0][-2:], ["white02", "command -v ffplay >/dev/null"])
+        self.assertIn("mpv or ffplay not found on white02", self.stderr.getvalue())
+        self.assertEqual(run.call_args.args[0][-2:], ["white02", "command -v mpv; command -v ffplay;"])
         self.assertEqual(KnownPCs(make_ctx()).hosts, ["white02"])
+
+    def test_player_choice(self) -> None:
+        """mpv is preferred when installed on the lab PC, ffplay otherwise; --player forces one."""
+        ctx = make_ctx("lab-display")
+        for wanted, installed, expected in [(None, "/usr/bin/mpv\n/usr/bin/ffplay\n", "mpv"),
+                                            (None, "/usr/bin/ffplay\n", "ffplay"),
+                                            ("ffplay", "/usr/bin/ffplay\n", "ffplay")]:
+            with self.subTest(wanted=wanted, installed=installed):
+                run = self.patch("mimtoolbox.tools.lab_display.run", return_value=completed(stdout=installed))
+                self.assertEqual(lab_display.find_player(ctx, "white02", wanted), expected)
+                self.assertEqual(run.call_args.args[0][-2:], ["white02", "command -v ffplay;" if wanted else
+                                                              "command -v mpv; command -v ffplay;"])
+        self.patch("mimtoolbox.tools.lab_display.run", return_value=completed(stdout="/usr/bin/mpv\n"))
+        with self.assertExits(1):
+            lab_display.find_player(ctx, "white02", "ffplay")
+        self.assertIn("ffplay not found on white02", self.stderr.getvalue())
 
 
 class StopProcessesTest(IsolatedTestCase):
