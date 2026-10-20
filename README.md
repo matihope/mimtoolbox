@@ -14,9 +14,50 @@ mimtoolbox.py <command> [options]
 
 `mimtoolbox.py --help` and `mimtoolbox.py <command> --help` list all options.
 
-## Install
+## Requirements
 
-Needs Python 3.8+ and `ssh`. Nothing to `pip install`.
+mimtoolbox uses only the Python standard library, so there's nothing to `pip install`. It does call
+these programs, which must already be installed. On the MIMUW side (`students` and the lab PCs),
+everything listed is provided by the faculty.
+
+**All commands** (on your computer):
+
+| program | needed for | install |
+|---|---|---|
+| Python 3.8+ (`python3`) | everything | macOS: `brew install python`; Linux: your distro's `python3` |
+| OpenSSH client (`ssh`, `scp`) | everything | preinstalled on macOS; Linux: `openssh-client` (Debian/Ubuntu) / `openssh` (Arch) |
+| `ssh-copy-id` | `setup`, when copying your key | comes with the OpenSSH client |
+| an SSH key (`~/.ssh/id_ed25519` or similar) | passwordless logins set up by `setup` | `ssh-keygen -t ed25519` |
+| `fzf` *(optional)* | picking a lab PC from a fuzzy list; without it you get a numbered list | `brew install fzf` / your distro's `fzf` |
+
+**`print`**: nothing beyond the above.
+
+**`lab-display` on macOS:**
+
+| program | install |
+|---|---|
+| [BetterDisplay](https://github.com/waydabber/BetterDisplay) in `/Applications`, with *CLI integration* enabled in its settings | `brew install --cask betterdisplay` |
+| `ffmpeg` (with AVFoundation and VideoToolbox, as in Homebrew's build) | `brew install ffmpeg` |
+
+**`lab-display` on Linux** (Wayland session with a ScreenCast portal that can create virtual monitors,
+e.g. GNOME):
+
+| program / plugin | Arch | Debian / Ubuntu |
+|---|---|---|
+| `gst-launch-1.0`, `gst-inspect-1.0` | `gstreamer` | `gstreamer1.0-tools` |
+| `videoconvert`, `videorate` | `gst-plugins-base` | `gstreamer1.0-plugins-base` |
+| `pipewiresrc` | `gst-plugin-pipewire` | `gstreamer1.0-pipewire` |
+| `h264parse`, `mpegtsmux` | `gst-plugins-bad` | `gstreamer1.0-plugins-bad` |
+| one H.264 encoder: `vah264lpenc`/`vah264enc` (hardware, preferred), `x264enc`, or `openh264enc` | `gst-plugin-va`, `gst-plugins-ugly`, or `gst-plugin-openh264` | `gstreamer1.0-plugins-bad` (VA), `gstreamer1.0-plugins-ugly` (x264) |
+| PyGObject (`import gi`) | `python-gobject` | `python3-gi` |
+
+**On the MIMUW side**, which you don't install yourself but the tools rely on:
+
+- On `students`: the `lk_booted_pcs` command, plus `lk_print_quota` for `print --quota`.
+- On the lab PCs: `lp`, `lpstat` and `lpoptions` for `print`; `ffplay`, `bash`, `pgrep`/`pkill` and
+  `xrandr` for `lab-display`. `xrandr` only detects the resolution; without it you get 1920x1080.
+
+## Install
 
 1. Clone the repo anywhere and put that directory on your `PATH`. The only executable in it is
    `mimtoolbox.py`, so nothing else gets onto your `PATH`.
@@ -105,14 +146,13 @@ the stream ends.
 3. Press Ctrl-C to stop. The virtual monitor and the remote player are cleaned up even if the
    process is killed.
 
-Requirements:
+Before the first run, install what's listed under [Requirements](#requirements). Then:
 
-- **macOS:** [BetterDisplay](https://github.com/waydabber/BetterDisplay) with CLI integration
-  enabled, and `ffmpeg` (`brew install ffmpeg`). Give your terminal the Screen Recording permission.
-- **Linux:** a Wayland session whose ScreenCast portal supports virtual monitors (GNOME), GStreamer
-  with `pipewiresrc` and an H.264 encoder (`gst-plugin-va` for hardware encoding), and PyGObject.
-  The first run shows a screen-sharing dialog; later runs skip it.
-- **Lab PC:** `ffplay` (installed in the labs).
+- **macOS:** give your terminal the *Screen Recording* permission (System Settings → Privacy &
+  Security). Without it the lab screen stays black.
+- **Linux:** the first run shows a screen-sharing dialog. Later runs skip it, because a restore
+  token is saved in `~/.local/state/mimtoolbox/`.
+- If you have several H.264 encoders, choose one with `--encoder` or the `encoder` setting.
 
 ## Adding a tool
 
