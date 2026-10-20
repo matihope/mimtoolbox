@@ -159,13 +159,47 @@ def close_master(ctx: Context, host: str, dry_run: bool = False) -> None:
         dry_run=dry_run, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+LAB_PC: str = r"[a-z]+\d+"
+"""Regex for a lab PC's name, e.g. white02."""
+
+
+def parse_booted(table: str) -> list[str]:
+    """The PC names in `lk_booted_pcs` output (a table with the name in the first column)."""
+    return re.findall(rf"^\|\s*({LAB_PC})\s*\|", table, re.M)
+
+
 def booted_pcs(ctx: Context) -> list[str]:
     """Names of the lab PCs that are currently running Linux, as reported by `lk_booted_pcs`."""
     res = run(["ssh", ctx.jump, "lk_booted_pcs"], capture_output=True)
-    hosts = re.findall(r"^\|\s*([a-z]+\d+)\s*\|", res.stdout, re.M)
+    hosts = parse_booted(res.stdout)
     if not hosts:
         die("no booted PCs reported by lk_booted_pcs" + (f" ({res.stderr.strip()})" if res.stderr else ""))
     return hosts
+
+
+_BOOTED_MARKER: str = "=== lk_booted_pcs ==="
+
+
+def desktop_pcs(ctx: Context) -> list[str]:
+    """Booted lab PCs where you have logged in at the desktop, most recent login first.
+
+    Each desktop login on a lab PC appends `<pc>/unix:0` to ~/.Xauthority, which is in the home
+    directory shared with students. So one call to students gives both that history and the booted
+    PCs. The history includes logins you've since logged out of, so check for a running session
+    before relying on one.
+    """
+    res = run(["ssh", ctx.jump, f"xauth -f ~/.Xauthority list 2>/dev/null | cut -d' ' -f1; "
+                                f"echo '{_BOOTED_MARKER}'; lk_booted_pcs"], capture_output=True)
+    if res.returncode == 255:
+        die(f"ssh to {ctx.jump} failed" + (f": {res.stderr.strip()}" if res.stderr else ""))
+    history, _, table = res.stdout.partition(_BOOTED_MARKER)
+    booted = set(parse_booted(table))
+    logins = re.findall(rf"^({LAB_PC})/unix:", history, re.M)
+    newest_first: list[str] = []
+    for host in reversed(logins):
+        if host in booted and host not in newest_first:
+            newest_first.append(host)
+    return newest_first
 
 
 class KnownPCs:

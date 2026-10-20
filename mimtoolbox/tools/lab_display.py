@@ -10,13 +10,15 @@ Local side:
                  First run shows a "share screen" dialog; the restore token saved afterwards skips it.
 
 Examples:
-  mimtoolbox.py lab-display                  pick a booted lab PC, use its resolution
+  mimtoolbox.py lab-display                  the PC where you're logged in, at its resolution
   mimtoolbox.py lab-display <pc> 1920x1080   stream to <pc> at a fixed resolution
   mimtoolbox.py lab-display --fps 60 --bitrate 12M
 
-Assumes you are already logged in on the lab PC's desktop (in person, as lab_user): the player is
-opened inside that existing graphical session, found through a process of yours that has DISPLAY or
-WAYLAND_DISPLAY set. Without such a session it stops. Key login to the PC: `mimtoolbox.py setup`.
+You must already be logged in at the lab PC's desktop (in person, as lab_user): the player opens
+inside that session, found through a process of yours that has DISPLAY or WAYLAND_DISPLAY set.
+Without a PC name, that PC is found automatically. Each desktop login adds the PC to ~/.Xauthority
+in your home dir (shared with students); the booted PCs listed there are checked for a running
+session.
 
 Cleanup (stop ffplay on the lab PC, remove the virtual monitor, close the ssh master) is done by a
 guardian process in its own session. It watches a pipe held by the main process, so it runs even
@@ -34,12 +36,13 @@ import signal
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from types import FrameType
 from typing import IO, Any, Callable, Mapping, Protocol, Sequence
 
-from mimtoolbox.core import (ConfigField, Context, booted_pcs, close_master, die, lab_ssh, log, pick_pc_interactive,
-                             quiet, run)
+from mimtoolbox.core import (ConfigField, Context, KnownPCs, close_master, desktop_pcs, die, lab_ssh, log,
+                             pick_pc_interactive, quiet, run)
 
 COMMAND: str = "lab-display"
 HELP: str = "Use a lab PC's monitor as an extra display."
@@ -415,9 +418,52 @@ class Guardian:
         os.close(self.w)
 
 
+def probe(ctx: Context, host: str, batch: bool = False) -> subprocess.CompletedProcess[str]:
+    """Look for your desktop session on a lab PC by running PROBE_SCRIPT there.
+
+    Returns:
+        The result: exit status 0 with the session's display variables (DISPLAY=... etc.) on
+        stdout, 3 if you have no session there, 255 if ssh failed.
+    """
+    return run(lab_ssh(ctx, host, batch, connect_timeout=10) + ["bash", "-s"], input=PROBE_SCRIPT,
+               capture_output=True)
+
+
+def find_desktop(ctx: Context) -> tuple[str, list[str]]:
+    """Find the lab PC where you're logged in at the desktop.
+
+    The candidates are the booted PCs from your desktop login history (`desktop_pcs`), probed with
+    key-only ssh, which works on a PC you're logged in to. The most recent login is tried first and
+    wins if its session is still running. Otherwise the rest are probed in parallel, and if more
+    than one has your session, you choose.
+
+    Returns:
+        The PC and its session's display variables.
+    """
+    candidates = desktop_pcs(ctx)
+    if not candidates:
+        die("you aren't logged in at the desktop of any booted lab PC - log in at one first, "
+            "or name the PC")
+    newest, older = candidates[0], candidates[1:]
+    log(f"looking for your desktop session on {newest}...")
+    res = probe(ctx, newest, batch=True)
+    if res.returncode == 0:
+        return newest, res.stdout.split()
+    if older:
+        log(f"not there; trying {', '.join(older)}...")
+    with ThreadPoolExecutor() as pool:
+        results = list(pool.map(lambda h: probe(ctx, h, batch=True), older))
+    found = {h: r.stdout.split() for h, r in zip(older, results) if r.returncode == 0}
+    if not found:
+        die(f"no desktop session of {ctx.lab_user} found on {', '.join(candidates)} - log in at a lab PC "
+            f"first, or name the PC")
+    host = next(iter(found)) if len(found) == 1 else pick_pc_interactive(list(found))
+    return host, found[host]
+
+
 def add_arguments(ap: argparse.ArgumentParser) -> None:
     """Register the lab-display options on the subparser."""
-    ap.add_argument("host", nargs="?", help="lab PC (default: choose from the booted ones)")
+    ap.add_argument("host", nargs="?", help="lab PC (default: the one where you're logged in at the desktop)")
     ap.add_argument("res", nargs="?", help="WxH (default: the lab PC's current resolution)")
     ap.add_argument("--fps", help="frames per second (config: fps)")
     ap.add_argument("--bitrate", help="video bitrate, e.g. 8M (config: bitrate)")
@@ -433,32 +479,35 @@ def main(args: argparse.Namespace, ctx: Context) -> int | None:
         die(f"bad fps: {fps}")
     bits_per_second(bitrate)
 
-    host: str = args.host or pick_pc_interactive(booted_pcs(ctx))
+    # --- Find the lab PC and the environment of your desktop session there ---
+    if args.host:
+        host: str = args.host
+        log(f"probing desktop session on {host}...")
+        res = probe(ctx, host)
+        if res.returncode != 0:
+            die(f"no graphical session of {ctx.lab_user} found on {host} - log in at the PC first"
+                + (f" ({res.stderr.strip()})" if res.returncode == 255 else ""))
+        session_env = res.stdout.split()
+    else:
+        host, session_env = find_desktop(ctx)
+    KnownPCs(ctx).remember(host)  # it takes the key now, so print can use it too
     ssh = lab_ssh(ctx, host)
-
-    # --- Find the environment of your graphical session on the lab PC ---
-    log(f"probing desktop session on {host}...")
-    probe = run(ssh + ["bash", "-s"], input=PROBE_SCRIPT, capture_output=True)
-    if probe.returncode != 0:
-        die(f"no graphical session of {ctx.lab_user} found on {host} - log in at the PC first"
-            + (f" ({probe.stderr.strip()})" if probe.returncode == 255 else ""))
-    session_env = probe.stdout.split()
     remote_env = "env " + " ".join(shlex.quote(kv) for kv in session_env)
     log(f"session: {' '.join(session_env)}")
 
     if run(ssh + ["command -v ffplay >/dev/null"]).returncode != 0:
         die(f"ffplay not found on {host}")
 
-    res: str | None = args.res
-    if not res:
+    size: str | None = args.res
+    if not size:
         out = run(ssh + [f"{remote_env} xrandr --current 2>/dev/null"], capture_output=True).stdout
         m = re.search(r"^\s+(\d+x\d+)\s.*\*", out, re.M)
-        res = m.group(1) if m else "1920x1080"
-    if not re.fullmatch(r"\d+x\d+", res):
-        die(f"bad resolution: {res}")
-    log(f"lab resolution: {res}")
+        size = m.group(1) if m else "1920x1080"
+    if not re.fullmatch(r"\d+x\d+", size):
+        die(f"bad resolution: {size}")
+    log(f"lab resolution: {size}")
 
-    stream = Stream(res, fps, bitrate, args.hidpi or cfg["hidpi"], args.encoder or cfg["encoder"])
+    stream = Stream(size, fps, bitrate, args.hidpi or cfg["hidpi"], args.encoder or cfg["encoder"])
     backend = make_backend(ctx, stream)
     backend.prepare()
     run(ssh + [remote_cleanup_cmd()])

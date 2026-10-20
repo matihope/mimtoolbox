@@ -134,6 +134,36 @@ class BootedPcsTest(IsolatedTestCase):
         self.assertIn("Permission denied", self.stderr.getvalue())
 
 
+class DesktopPcsTest(IsolatedTestCase):
+    """Finding PCs with your desktop login from ~/.Xauthority."""
+
+    HISTORY = ("brown09/unix:0\nstudents/unix:98\nstudents.mimuw.edu.pl:98\nwhite02/unix:0\nred01/unix:0\n"
+               "orange02/unix:0\nwhite02/unix:0\n")
+
+    def test_booted_logins_newest_first(self) -> None:
+        """Lab PCs from the history that are booted, latest login first, without duplicates or students."""
+        out = self.HISTORY + "=== lk_booted_pcs ===\n" + BootedPcsTest.TABLE.replace("black00", "white02").replace(
+            "red16", "brown09") + "| red01    | 10.1.1.21  |\n"
+        run = self.patch("mimtoolbox.core.run", return_value=completed(stdout=out))
+        self.assertEqual(core.desktop_pcs(make_ctx()), ["white02", "red01", "brown09"])
+        remote = run.call_args.args[0]
+        self.assertEqual(remote[:2], ["ssh", "ab123456@students.mimuw.edu.pl"])
+        self.assertIn("xauth -f ~/.Xauthority list", remote[2])
+        self.assertIn("lk_booted_pcs", remote[2])
+
+    def test_no_xauthority(self) -> None:
+        """Without a login history there are no candidates."""
+        self.patch("mimtoolbox.core.run", return_value=completed(stdout="=== lk_booted_pcs ===\n" + BootedPcsTest.TABLE))
+        self.assertEqual(core.desktop_pcs(make_ctx()), [])
+
+    def test_ssh_failure_exits(self) -> None:
+        """Failing to reach students is reported."""
+        self.patch("mimtoolbox.core.run", return_value=completed(255, stderr="Connection refused"))
+        with self.assertExits(1):
+            core.desktop_pcs(make_ctx())
+        self.assertIn("Connection refused", self.stderr.getvalue())
+
+
 class KnownPCsTest(IsolatedTestCase):
     """The shared list of lab PCs that took the key."""
 

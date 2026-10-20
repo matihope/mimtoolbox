@@ -91,14 +91,22 @@ the stream ends.
 2. On your own computer, run one of:
 
    ```sh
-   mimtoolbox.py lab-display                    # choose from the booted lab PCs (uses fzf if installed)
-   mimtoolbox.py lab-display <pc>               # a specific PC, at its current resolution
+   mimtoolbox.py lab-display                    # the PC where you're logged in, at its resolution
+   mimtoolbox.py lab-display <pc>               # a specific PC
    mimtoolbox.py lab-display <pc> 1920x1080     # a fixed resolution
    mimtoolbox.py lab-display --fps 60 --bitrate 12M
    ```
 
 3. Press Ctrl-C to stop. The virtual monitor and the remote player are cleaned up even if the
    process is killed.
+
+**How it finds your PC.** Every desktop login on a lab PC adds that PC to `~/.Xauthority`, which is
+in your home directory shared with `students`. So one call to `students` gives your login history
+and the list of booted PCs. lab-display first checks the PC you logged in to most recently. If your
+session there is gone, it checks the other booted PCs from the history. If several have your
+session, it asks which one to use (with fzf if it's installed). These checks use only your SSH key,
+which a lab PC accepts while you're logged in there, so they never ask for a password. The PC it
+finds is also remembered for `print`. To skip the search, name the PC.
 
 Before the first run, install what's listed under [Requirements](#requirements). Then:
 

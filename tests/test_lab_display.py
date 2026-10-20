@@ -7,6 +7,7 @@ import sys
 import types
 from typing import Any, Sequence
 
+from mimtoolbox.core import KnownPCs
 from mimtoolbox.tools import lab_display
 from tests.support import IsolatedTestCase, completed, make_ctx, parse
 
@@ -110,14 +111,72 @@ class BackendTest(IsolatedTestCase):
         self.assertIn("unsupported encoder mystery264", self.stderr.getvalue())
 
 
+def session(host: str) -> str:
+    """Probe output for a desktop session (what PROBE_SCRIPT prints)."""
+    return f"DISPLAY=:0\nXAUTHORITY=/home/{host}/.Xauthority\n"
+
+
+class FindDesktopTest(IsolatedTestCase):
+    """Finding the lab PC where you're logged in at the desktop."""
+
+    def scenario(self, candidates: Sequence[str], sessions: Sequence[str]) -> list[tuple[str, bool]]:
+        """Stub the login history and the probes; return the (host, batch) probes made."""
+        self.patch("mimtoolbox.tools.lab_display.desktop_pcs", return_value=list(candidates))
+        probes: list[tuple[str, bool]] = []
+
+        def probe(ctx: Any, host: str, batch: bool = False) -> Any:
+            """Stub probe: a session on the PCs in `sessions`, key rejected elsewhere."""
+            probes.append((host, batch))
+            return completed(0, session(host)) if host in sessions else completed(255, stderr="Permission denied")
+
+        self.patch("mimtoolbox.tools.lab_display.probe", probe)
+        return probes
+
+    def test_newest_login_wins(self) -> None:
+        """If the most recent login's session is running, it's used without probing the others."""
+        probes = self.scenario(["white02", "red01"], sessions=["white02", "red01"])
+        host, env = lab_display.find_desktop(make_ctx("lab-display"))
+        self.assertEqual((host, env), ("white02", ["DISPLAY=:0", "XAUTHORITY=/home/white02/.Xauthority"]))
+        self.assertEqual(probes, [("white02", True)])
+
+    def test_falls_back_to_older_logins(self) -> None:
+        """If the newest login has no session, the older ones are probed; all probes are key-only."""
+        probes = self.scenario(["white02", "red01", "black00"], sessions=["black00"])
+        self.assertEqual(lab_display.find_desktop(make_ctx("lab-display"))[0], "black00")
+        self.assertEqual(probes[0], ("white02", True))
+        self.assertEqual(sorted(probes[1:]), [("black00", True), ("red01", True)])
+
+    def test_several_older_sessions_ask(self) -> None:
+        """With sessions on several older PCs, the user chooses, newest login first."""
+        self.scenario(["black00", "red01", "white02"], sessions=["white02", "red01"])
+        pick = self.patch("mimtoolbox.tools.lab_display.pick_pc_interactive", return_value="white02")
+        self.assertEqual(lab_display.find_desktop(make_ctx("lab-display"))[0], "white02")
+        pick.assert_called_once_with(["red01", "white02"])
+
+    def test_no_login_history(self) -> None:
+        """If no booted PC has your desktop login, it says so without probing anything."""
+        probes = self.scenario([], sessions=[])
+        with self.assertExits(1):
+            lab_display.find_desktop(make_ctx("lab-display"))
+        self.assertIn("you aren't logged in at the desktop of any booted lab PC", self.stderr.getvalue())
+        self.assertEqual(probes, [])
+
+    def test_logged_out_everywhere(self) -> None:
+        """If the PCs from the history have no running session (you logged out), it says so."""
+        self.scenario(["white02"], sessions=[])
+        with self.assertExits(1):
+            lab_display.find_desktop(make_ctx("lab-display"))
+        self.assertIn("no desktop session of ab123456 found on white02", self.stderr.getvalue())
+
+
 class MainTest(IsolatedTestCase):
     """The checks main() does before streaming."""
 
     def setUp(self) -> None:
-        """Fail the test if main() tries to list booted PCs unexpectedly."""
+        """Fail the test if main() goes looking for the desktop PC unexpectedly."""
         super().setUp()
-        self.booted = self.patch("mimtoolbox.tools.lab_display.booted_pcs",
-                                 side_effect=AssertionError("must not ask students"))
+        self.find = self.patch("mimtoolbox.tools.lab_display.find_desktop",
+                               side_effect=AssertionError("must not look for the desktop PC"))
 
     def run_main(self, argv: Sequence[str], **settings: str) -> Any:
         """Run lab-display with argv and the config defaults (overridden by `settings`)."""
@@ -135,22 +194,23 @@ class MainTest(IsolatedTestCase):
                 self.run_main(argv, **settings)
             self.assertIn(message, self.stderr.getvalue())
 
-    def test_requires_desktop_session(self) -> None:
-        """If you aren't logged in at the lab PC's desktop, it stops and says so."""
+    def test_named_pc_requires_desktop_session(self) -> None:
+        """With a PC named, it is probed (password allowed); no session there means a clear error."""
         run = self.patch("mimtoolbox.tools.lab_display.run", return_value=completed(3))
         with self.assertExits(1):
             self.run_main(["red01"])
         self.assertIn("no graphical session of ab123456 found on red01 - log in at the PC first",
                       self.stderr.getvalue())
         self.assertEqual(run.call_args.kwargs["input"], lab_display.PROBE_SCRIPT)
+        self.assertNotIn("BatchMode=yes", run.call_args.args[0])
 
-    def test_picks_from_booted_pcs_without_host(self) -> None:
-        """Without a host, the user chooses among the booted PCs."""
-        self.booted.side_effect = None
-        self.booted.return_value = ["red01", "red02"]
-        pick = self.patch("mimtoolbox.tools.lab_display.pick_pc_interactive", return_value="red02")
-        self.patch("mimtoolbox.tools.lab_display.run", return_value=completed(3))
+    def test_detected_pc_is_used_and_remembered(self) -> None:
+        """Without a PC name the detected one is used, and remembered for print (it takes the key)."""
+        self.find.side_effect = None
+        self.find.return_value = ("white02", ["DISPLAY=:0"])
+        run = self.patch("mimtoolbox.tools.lab_display.run", return_value=completed(1))  # no ffplay: stop there
         with self.assertExits(1):
             self.run_main([])
-        pick.assert_called_once_with(["red01", "red02"])
-        self.assertIn("found on red02", self.stderr.getvalue())
+        self.assertIn("ffplay not found on white02", self.stderr.getvalue())
+        self.assertEqual(run.call_args.args[0][-2:], ["white02", "command -v ffplay >/dev/null"])
+        self.assertEqual(KnownPCs(make_ctx()).hosts, ["white02"])
