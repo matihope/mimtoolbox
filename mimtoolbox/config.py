@@ -23,21 +23,33 @@ def config_path() -> pathlib.Path:
 
 
 def load() -> configparser.ConfigParser:
-    """Read the config file; an empty config if it doesn't exist."""
+    """Read the config file; an empty config if it doesn't exist.
+
+    Exits if the file exists but can't be read or parsed.
+    """
+    path = config_path()
     cp = configparser.ConfigParser(interpolation=None)
     try:
-        cp.read(config_path())
+        with open(path) as f:
+            cp.read_file(f)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        die(f"can't read config file {path}: {e.strerror}")
     except configparser.Error as e:
-        die(f"bad config file {config_path()}: {e}")
+        die(f"bad config file {path}: {e}")
     return cp
 
 
 def save(cp: configparser.ConfigParser) -> None:
-    """Write the config file."""
+    """Write the config file; exits if it can't be written."""
     path = config_path()
-    with open(path, "w") as f:
-        f.write(HEADER)
-        cp.write(f)
+    try:
+        with open(path, "w") as f:
+            f.write(HEADER)
+            cp.write(f)
+    except OSError as e:
+        die(f"can't write config file {path}: {e.strerror}")
     log(f"wrote {path}")
 
 
