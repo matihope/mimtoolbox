@@ -168,7 +168,12 @@ polls every 10 ms) ~40-80 ms with occasional stalls."""
 def player_cmd(player: str) -> str:
     """The shell command that plays the stream from stdin fullscreen on the lab PC, titled SCREEN_NAME."""
     if player == "mpv":
-        return (f"mpv --profile=low-latency --untimed --no-cache --fs --no-border --osc=no --cursor-autohide=always "
+        # Don't wait for vsync before showing the next frame. Otherwise mpv shows at most one frame per
+        # refresh, so a 60 fps stream on a 59.95 Hz monitor never drains the ~1 s it queues while mpv
+        # starts up (measured: 1.2 s delay at 60 fps vs 0.12 s at 30). Mailbox would avoid tearing, but
+        # NVIDIA's driver doesn't offer it for mpv's window; with OpenGL, no swap interval does the same.
+        return (f"mpv --profile=low-latency --untimed --no-cache --vulkan-swap-mode=immediate --opengl-swapinterval=0 "
+                f"--fs --no-border --osc=no --cursor-autohide=always "
                 f"--no-audio --input-terminal=no --msg-level=all=error --title={SCREEN_NAME} -")
     # -sync video: pace by the video itself, not an external clock that slows playback down when
     # few frames are queued (always the case for a live stream).

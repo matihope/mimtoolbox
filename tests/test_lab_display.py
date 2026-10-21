@@ -125,9 +125,10 @@ class PriorityTest(IsolatedTestCase):
         self.assertEqual(args[args.index("-x264-params") + 1], "fps=45")
 
     def test_players_show_frames_immediately(self) -> None:
-        """mpv shows frames untimed; ffplay paces by the video instead of slowing to an external clock."""
+        """mpv shows frames untimed, without waiting for vsync; ffplay paces by the video, not an external clock."""
         mpv = lab_display.player_cmd("mpv")
-        for opt in ("--profile=low-latency", "--untimed", "--fs", "--input-terminal=no", " -"):
+        for opt in ("--profile=low-latency", "--untimed", "--vulkan-swap-mode=immediate", "--opengl-swapinterval=0",
+                    "--fs", "--input-terminal=no", " -"):
             self.assertIn(opt, mpv)
         ffplay = lab_display.player_cmd("ffplay")
         for opt in ("-sync video", "-fflags nobuffer", "-flags low_delay", "-framedrop", "-i -"):
