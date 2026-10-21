@@ -8,6 +8,9 @@ Local side:
   macOS          BetterDisplay virtual screen -> ffmpeg (AVFoundation; x264 or VideoToolbox H.264)
   Linux/Wayland  ScreenCast portal virtual monitor (GNOME) -> GStreamer (pipewiresrc, H.264 encoder)
                  First run shows a "share screen" dialog; the restore token saved afterwards skips it.
+                 GNOME 50 stops sending frames of a virtual monitor once the display configuration
+                 changes (e.g. displays rearranged in Settings); lab-display then starts a new one,
+                 which GNOME puts back at its default position.
 
 Priorities (--priority, or `priority` in the config):
   latency  (default) 60 fps, 16M, x264 on the CPU (zerolatency): ~0.15 s less delay, ~1 CPU core
@@ -42,6 +45,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -129,8 +133,11 @@ class Backend(Protocol):
     def prepare(self) -> None:
         """Get ready to start; runs before the guardian is forked."""
 
-    def start(self) -> subprocess.Popen[bytes]:
-        """Create the virtual monitor and start a process writing its H.264 MPEG-TS to stdout."""
+    def start(self, out: int) -> subprocess.Popen[bytes]:
+        """Create the virtual monitor and start a process writing its H.264 MPEG-TS to the fd `out`."""
+
+    def stalled(self) -> bool:
+        """Whether the capture is stuck for good, so it has to be restarted (cleanup(), then start())."""
 
     def cleanup(self) -> None:
         """Remove the virtual monitor; idempotent."""
@@ -234,8 +241,8 @@ class MacBackend:
         time.sleep(1)
         self.before = self.list_screens()
 
-    def start(self) -> subprocess.Popen[bytes]:
-        """Connect the virtual screen, find its capture device and start ffmpeg on it."""
+    def start(self, out: int) -> subprocess.Popen[bytes]:
+        """Connect the virtual screen, find its capture device and start ffmpeg on it, writing to `out`."""
         s = self.stream
         self.bd("set", f"-nameLike={SCREEN_NAME}", "-connected=on")
         idx = None
@@ -255,11 +262,33 @@ class MacBackend:
              "-i", f"{idx}:none",
              "-vf", f"scale={s.width}:{s.height},format=nv12",
              *self.encoder_args, *LOW_DELAY_MUX, "-f", "mpegts", "-"],
-            stdout=subprocess.PIPE)
+            stdout=out)
+
+    def stalled(self) -> bool:
+        """Never: AVFoundation just sends no frames while the screen doesn't change."""
+        return False
 
     def cleanup(self) -> None:
         """Disconnect the virtual screen."""
         self.bd("set", f"-nameLike={SCREEN_NAME}", "-connected=off")
+
+
+def relay(src: IO[bytes], dst: int, on_data: Callable[[], None]) -> None:
+    """Copy `src` to the fd `dst` until EOF or until the reader is gone, calling `on_data` for every chunk.
+
+    Owns both: closes them at the end (so `dst` should be a dup of its own, which nobody else can close
+    and reuse while this still writes to it).
+    """
+    try:
+        while chunk := os.read(src.fileno(), 65536):
+            on_data()
+            while chunk:
+                chunk = chunk[os.write(dst, chunk):]
+    except OSError:  # the player is gone
+        pass
+    finally:
+        src.close()
+        os.close(dst)
 
 
 class PortalBackend:
@@ -273,6 +302,8 @@ class PortalBackend:
     OBJ: str = "/org/freedesktop/portal/desktop"
     IFACE: str = "org.freedesktop.portal.ScreenCast"
     VIRTUAL, CURSOR_EMBEDDED, PERSIST_UNTIL_REVOKED = 4, 2, 2
+    DISPLAY_CONFIG: str = "org.gnome.Mutter.DisplayConfig"
+    STALL_SECONDS: float = 2.0
     hint: str = "move windows to the new monitor (arrange it in Settings > Displays)"
 
     # element -> (input format, properties); the order of preference is in PRESETS
@@ -313,6 +344,9 @@ class PortalBackend:
         self.bus: Any = None
         self.session: Any = None
         self.n = 0
+        self.watch: int | None = None  # subscription to GNOME's display configuration changes
+        self.last_data: float | None = None  # time.monotonic() of the capture's latest output
+        self.changed_at: float | None = None  # time.monotonic() of the latest display configuration change
 
     def prepare(self) -> None:
         """Nothing to do before the guardian is forked."""
@@ -349,12 +383,19 @@ class PortalBackend:
             die(f"portal {method} " + ("cancelled" if code == 1 else f"failed (code {code})"))
         return dict(results)
 
-    def start(self) -> subprocess.Popen[bytes]:
-        """Open a ScreenCast session with a virtual monitor and start GStreamer on its PipeWire stream."""
+    def start(self, out: int) -> subprocess.Popen[bytes]:
+        """Open a ScreenCast session with a virtual monitor and start GStreamer on its PipeWire stream.
+
+        GStreamer's output is relayed to `out` by a thread, which notes when it last saw any (see stalled()).
+        """
         from gi.repository import Gio, GLib
         V = GLib.Variant
         s = self.stream
         self.bus = Gio.bus_get_sync(Gio.BusType.SESSION)
+        self.last_data = self.changed_at = None
+        self.watch = self.bus.signal_subscribe(self.DISPLAY_CONFIG, self.DISPLAY_CONFIG, "MonitorsChanged",
+                                               "/org/gnome/Mutter/DisplayConfig", None, 0,
+                                               self._on_monitors_changed)
         try:
             types = self.bus.call_sync(self.DEST, self.OBJ, "org.freedesktop.DBus.Properties", "Get",
                                        V("(ss)", (self.IFACE, "AvailableSourceTypes")), None, 0, 5000,
@@ -381,10 +422,10 @@ class PortalBackend:
             with open(self.token_file, "w") as f:
                 f.write(r["restore_token"])
         node = r["streams"][0][0]
-        out, fds = self.bus.call_with_unix_fd_list_sync(self.DEST, self.OBJ, self.IFACE, "OpenPipeWireRemote",
-                                                        V("(oa{sv})", (self.session, {})), None, 0, -1, None,
-                                                        None)
-        fd: int = fds.get(out.unpack()[0])
+        reply, fds = self.bus.call_with_unix_fd_list_sync(self.DEST, self.OBJ, self.IFACE, "OpenPipeWireRemote",
+                                                          V("(oa{sv})", (self.session, {})), None, 0, -1, None,
+                                                          None)
+        fd: int = fds.get(reply.unpack()[0])
 
         fmt, props = self.ENCODERS[self.encoder]
         bps = bits_per_second(s.bitrate)
@@ -400,13 +441,48 @@ class PortalBackend:
         proc = subprocess.Popen(["gst-launch-1.0", "-q", *shlex.split(pipeline)],
                                 stdout=subprocess.PIPE, stdin=subprocess.DEVNULL, pass_fds=[fd])
         os.close(fd)
+        assert proc.stdout
+        threading.Thread(target=relay, args=(proc.stdout, os.dup(out), self._on_data), daemon=True).start()
         return proc
+
+    def _on_data(self) -> None:
+        """Note that the capture has just sent something."""
+        self.last_data = time.monotonic()
+
+    def _on_monitors_changed(self, *signal_args: Any) -> None:
+        """Note that the display configuration has just changed (D-Bus signal handler)."""
+        self.changed_at = time.monotonic()
+
+    def stalled(self) -> bool:
+        """Whether GNOME has stopped the stream after a display configuration change.
+
+        Handles the D-Bus signals that arrived since the last call, then applies is_stalled().
+        """
+        from gi.repository import GLib
+        ctx = GLib.MainContext.default()
+        while ctx.pending():
+            ctx.iteration(False)
+        return self.is_stalled(time.monotonic())
+
+    def is_stalled(self, now: float) -> bool:
+        """Whether the capture, after sending output, has sent nothing since a display change STALL_SECONDS ago.
+
+        pipewiresrc's keepalive makes a working capture send frames even while the screen doesn't
+        change, so silence means the stream has stopped. GNOME 50 stops a virtual monitor's stream on
+        every display configuration change (rearranging displays, re-applying the same layout, a
+        hotplug), and neither reconnecting to it nor resizing brings it back.
+        """
+        return (self.last_data is not None and self.changed_at is not None
+                and self.last_data < self.changed_at and now - self.changed_at >= self.STALL_SECONDS)
 
     def cleanup(self) -> None:
         """Close the ScreenCast session, which removes the virtual monitor.
 
         Only meaningful in the main process; the guardian has no bus (the monitor dies with ours).
         """
+        if self.bus and self.watch is not None:
+            self.bus.signal_unsubscribe(self.watch)
+            self.watch = None
         if self.bus and self.session:
             try:
                 self.bus.call_sync(self.DEST, self.session, "org.freedesktop.portal.Session", "Close",
@@ -610,6 +686,42 @@ def video_settings(args: argparse.Namespace, cfg: Mapping[str, str]) -> tuple[st
     return priority, fps, bitrate
 
 
+def stream_to_player(backend: Backend, player_cmd: list[str], guardian: Guardian,
+                     procs: list[subprocess.Popen[bytes]]) -> None:
+    """Run the capture into the player until either ends, starting the capture again whenever it stalls.
+
+    The capture writes into a pipe of ours rather than straight into the player, so that a new capture
+    can go on feeding the same player (which plays the concatenated MPEG-TS streams right through).
+
+    Args:
+        player_cmd: The command that runs the player, reading the stream from stdin.
+        procs: Every process started is appended to it, so the caller can stop the ones left running.
+    """
+    r, w = os.pipe()
+    try:
+        capture = backend.start(w)
+        procs.append(capture)
+        guardian.send(f"pid {capture.pid}")
+        player = subprocess.Popen(player_cmd, stdin=r)
+        procs.append(player)
+        guardian.send(f"pid {player.pid}")
+        log(f"streaming - Ctrl-C to stop ({backend.hint})")
+        while capture.poll() is None and player.poll() is None:
+            if backend.stalled():
+                log("the desktop stopped sending frames after the display change; starting a new virtual "
+                    "monitor (it comes back at its default position)")
+                stop_processes([capture.pid])
+                backend.cleanup()
+                capture = backend.start(w)
+                procs.append(capture)
+                guardian.send(f"pid {capture.pid}")
+            time.sleep(0.5)
+        log("stream ended")
+    finally:
+        os.close(r)
+        os.close(w)
+
+
 def main(args: argparse.Namespace, ctx: Context) -> int | None:
     """Stream a local virtual monitor to the lab PC until Ctrl-C or until the stream ends."""
     cfg = ctx.settings
@@ -658,21 +770,8 @@ def main(args: argparse.Namespace, ctx: Context) -> int | None:
     signal.signal(signal.SIGHUP, on_signal)
 
     try:
-        capture = backend.start()
-        procs.append(capture)
-        guardian.send(f"pid {capture.pid}")
-        capture_out: IO[bytes] | None = capture.stdout
         log(f"playing with {player} on {host}")
-        player_proc = subprocess.Popen(ssh + [f"{remote_env} {player_cmd(player)}"], stdin=capture_out)
-        if capture_out:
-            capture_out.close()
-        procs.append(player_proc)
-        guardian.send(f"pid {player_proc.pid}")
-        log(f"streaming to {host} - Ctrl-C to stop ({backend.hint})")
-
-        while all(p.poll() is None for p in procs):
-            time.sleep(0.5)
-        log("stream ended")
+        stream_to_player(backend, ssh + [f"{remote_env} {player_cmd(player)}"], guardian, procs)
     except KeyboardInterrupt:
         pass
     finally:

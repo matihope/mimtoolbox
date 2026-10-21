@@ -9,6 +9,7 @@ import sys
 import time
 import types
 from typing import Any, Sequence
+from unittest import mock
 
 from mimtoolbox.core import KnownPCs
 from mimtoolbox.tools import lab_display
@@ -190,14 +191,18 @@ class BackendTest(IsolatedTestCase):
             lab_display.make_backend(make_ctx("lab-display"), stream())
         self.assertIn("needs a Wayland session", self.stderr.getvalue())
 
-    def test_linux_encoder_choice(self) -> None:
-        """The priority's first installed encoder is used, unless one is configured; unknown ones are refused."""
+    def pretend_linux(self) -> None:
+        """A Wayland session with GStreamer, PyGObject and some encoders installed."""
         self.patch("sys.platform", "linux")
         self.patch_dict(os.environ, {"WAYLAND_DISPLAY": "wayland-0"})
         self.patch("shutil.which", return_value="/usr/bin/gst")
         installed = {"pipewiresrc", "x264enc", "vah264enc", "openh264enc", "mystery264"}
         self.patch("mimtoolbox.tools.lab_display.quiet", side_effect=lambda cmd: cmd[-1] in installed)
-        self.patch_dict(sys.modules, {"gi": types.ModuleType("gi")})  # pretend PyGObject is installed
+        self.patch_dict(sys.modules, {"gi": types.ModuleType("gi")})
+
+    def test_linux_encoder_choice(self) -> None:
+        """The priority's first installed encoder is used, unless one is configured; unknown ones are refused."""
+        self.pretend_linux()
         ctx = make_ctx("lab-display")
         backend = lab_display.make_backend(ctx, stream())
         assert isinstance(backend, lab_display.PortalBackend)
@@ -212,6 +217,143 @@ class BackendTest(IsolatedTestCase):
         with self.assertExits(1):
             lab_display.make_backend(ctx, stream(encoder="mystery264"))
         self.assertIn("unsupported encoder mystery264", self.stderr.getvalue())
+
+    def test_linux_stall(self) -> None:
+        """Regression: GNOME 50 stops the stream at a display change; silence for 2 s after one is a stall."""
+        self.pretend_linux()
+        backend = lab_display.make_backend(make_ctx("lab-display"), stream())
+        assert isinstance(backend, lab_display.PortalBackend)
+        self.assertFalse(backend.is_stalled(100))  # nothing yet
+        backend.changed_at = 10.0  # our own virtual monitor appearing, before any output
+        self.assertFalse(backend.is_stalled(100))
+        backend.last_data = 10.5  # output flows after the change
+        self.assertFalse(backend.is_stalled(100))
+        backend.changed_at = 20.0  # displays rearranged, nothing since
+        self.assertFalse(backend.is_stalled(21.9))
+        self.assertTrue(backend.is_stalled(22.0))
+        backend.last_data = 21.0  # output resumed: a GNOME that keeps the stream going
+        self.assertFalse(backend.is_stalled(30))
+        self.assertFalse(lab_display.MacBackend.stalled(mock.Mock()))  # AVFoundation is just quiet when idle
+
+
+class RelayTest(IsolatedTestCase):
+    """Relaying the capture's output to the player's pipe."""
+
+    def test_copies_and_closes(self) -> None:
+        """Everything is copied, each chunk is reported, and both ends are closed at EOF."""
+        src_r, src_w = os.pipe()
+        dst_r, dst_w = os.pipe()
+        os.write(src_w, b"frame1frame2")
+        os.close(src_w)
+        src = os.fdopen(src_r, "rb")
+        seen: list[int] = []
+        lab_display.relay(src, dst_w, lambda: seen.append(1))
+        self.assertTrue(src.closed)
+        with self.assertRaises(OSError):
+            os.fstat(dst_w)
+        self.assertEqual(os.read(dst_r, 100), b"frame1frame2")
+        self.assertEqual(os.read(dst_r, 100), b"")  # EOF: the relay held the only write end
+        os.close(dst_r)
+        self.assertTrue(seen)
+
+    def test_player_gone(self) -> None:
+        """When the player has gone (nobody reads), the relay stops instead of raising."""
+        src_r, src_w = os.pipe()
+        dst_r, dst_w = os.pipe()
+        os.close(dst_r)
+        os.write(src_w, b"frame")
+        os.close(src_w)
+        lab_display.relay(os.fdopen(src_r, "rb"), dst_w, lambda: None)  # must not raise
+
+
+class FakeProc:
+    """A process that is running until `polls` polls have been made."""
+
+    def __init__(self, pid: int, polls: int = 10**6) -> None:
+        """Running for `polls` polls; exits with 0 after that."""
+        self.pid, self.polls = pid, polls
+
+    def poll(self) -> int | None:
+        """None while running, 0 once it has exited."""
+        self.polls -= 1
+        return None if self.polls >= 0 else 0
+
+
+class FakeBackend:
+    """A backend whose captures write one line each, stalling as told."""
+
+    hint = "a hint"
+
+    def __init__(self, stalls: Sequence[bool]) -> None:
+        """`stalls`: what stalled() answers on successive calls (then False)."""
+        self.stalls = list(stalls)
+        self.captures: list[FakeProc] = []
+        self.cleanups = 0
+
+    def prepare(self) -> None:
+        """Nothing to prepare."""
+
+    def start(self, out: int) -> Any:
+        """Write a line to `out` and return a running fake capture."""
+        os.write(out, f"capture {len(self.captures)}\n".encode())
+        self.captures.append(FakeProc(1000 + len(self.captures)))
+        return self.captures[-1]
+
+    def stalled(self) -> bool:
+        """The next answer from `stalls`."""
+        return self.stalls.pop(0) if self.stalls else False
+
+    def cleanup(self) -> None:
+        """Count the calls."""
+        self.cleanups += 1
+
+
+class StreamToPlayerTest(IsolatedTestCase):
+    """The streaming loop: capture into the player, restarting a stalled capture."""
+
+    def run_stream(self, backend: FakeBackend, player_polls: int) -> tuple[bytes, list[str], list[Any], Any]:
+        """Run stream_to_player with a fake player that runs for `player_polls` polls.
+
+        Returns:
+            What the player got on stdin, the guardian's protocol lines, the procs list and the
+            stop_processes mock.
+        """
+        self.patch("time.sleep")
+        stop = self.patch("mimtoolbox.tools.lab_display.stop_processes")
+        stdins: list[int] = []
+
+        def popen(cmd: list[str], stdin: int) -> FakeProc:
+            """The player: keep a copy of its stdin to read what it got."""
+            stdins.append(os.dup(stdin))
+            return FakeProc(2000, player_polls)
+        self.patch("subprocess.Popen", side_effect=popen)
+        guardian = mock.Mock()
+        procs: list[Any] = []
+        lab_display.stream_to_player(backend, ["player"], guardian, procs)
+        with os.fdopen(stdins[0], "rb") as f:
+            got = f.read()
+        return got, [c.args[0] for c in guardian.send.call_args_list], procs, stop
+
+    def test_restart_after_stall(self) -> None:
+        """A stalled capture is stopped and replaced; the player keeps running and gets both streams."""
+        backend = FakeBackend([False, True, False])
+        got, sent, procs, stop = self.run_stream(backend, player_polls=4)
+        self.assertEqual(got, b"capture 0\ncapture 1\n")
+        self.assertEqual(len(backend.captures), 2)
+        self.assertEqual(backend.cleanups, 1)
+        stop.assert_called_once_with([1000])
+        self.assertEqual(sent, ["pid 1000", "pid 2000", "pid 1001"])
+        self.assertEqual([p.pid for p in procs], [1000, 2000, 1001])
+        self.assertIn("starting a new virtual monitor", self.stderr.getvalue())
+        self.assertIn("stream ended", self.stderr.getvalue())
+
+    def test_no_stall(self) -> None:
+        """Without a stall there's one capture until the player ends."""
+        backend = FakeBackend([])
+        got, sent, procs, stop = self.run_stream(backend, player_polls=3)
+        self.assertEqual(got, b"capture 0\n")
+        self.assertEqual(backend.cleanups, 0)
+        stop.assert_not_called()
 
 
 def session(host: str) -> str:

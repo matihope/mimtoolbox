@@ -139,7 +139,11 @@ Before the first run, install what's listed under [Requirements](#requirements).
 - **macOS:** give your terminal the *Screen Recording* permission (System Settings → Privacy &
   Security). Without it the lab screen stays black.
 - **Linux:** the first run shows a screen-sharing dialog. Later runs skip it, because a restore
-  token is saved in `~/.local/state/mimtoolbox/`.
+  token is saved in `~/.local/state/mimtoolbox/`. GNOME 50 stops sending a virtual monitor's
+  frames whenever the display configuration changes: displays rearranged in Settings, a monitor
+  plugged in, even the same layout applied again. lab-display notices and starts a new virtual
+  monitor without the dialog, but GNOME puts it back at its default position (right of the
+  others), so leave the arrangement as it is while streaming.
 - If you have several H.264 encoders, choose one with `--encoder` or the `encoder` setting.
 
 ## Requirements
