@@ -21,15 +21,20 @@ def _no_processes(*args: Any, **kwargs: Any) -> Any:
     raise AssertionError(f"tests must not start processes, got: {args[0] if args else kwargs}")
 
 
+def _no_network(*args: Any, **kwargs: Any) -> Any:
+    """Stand-in for urllib's opener that fails the test instead of sending a request."""
+    raise AssertionError(f"tests must not use the network, got: {args[0] if args else kwargs}")
+
+
 class IsolatedTestCase(unittest.TestCase):
     """A test case that can't touch the real machine or network.
 
     HOME, the config file and the XDG cache/state dirs point into a fresh temp dir, starting processes
-    fails the test, and log output (stderr) is captured in `self.stderr`.
+    or sending HTTP requests fails the test, and log output (stderr) is captured in `self.stderr`.
     """
 
     def setUp(self) -> None:
-        """Create the temp dir, redirect the environment and block subprocesses."""
+        """Create the temp dir, redirect the environment and block subprocesses and the network."""
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.tmp = pathlib.Path(tmp.name)
@@ -39,6 +44,7 @@ class IsolatedTestCase(unittest.TestCase):
         self.patch_dict(os.environ, env)
         self.patch("subprocess.run", side_effect=_no_processes)
         self.patch("subprocess.Popen", side_effect=_no_processes)
+        self.patch("urllib.request.OpenerDirector.open", side_effect=_no_network)
         self.stderr = io.StringIO()
         self.patch("sys.stderr", self.stderr)
         core.set_prog("mimtoolbox")

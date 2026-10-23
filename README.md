@@ -11,6 +11,7 @@ mimtoolbox.py <command> [options]
 | `setup`       | create/update this machine's config, set up SSH key logins           |
 | `print`       | print local files on the student printer (through a lab PC)          |
 | `lab-display` | use a lab PC's monitor as an extra display for this computer         |
+| `rooms`       | find free rooms in the MIM building, by kind, size, floor and time   |
 
 `mimtoolbox.py --help` and `mimtoolbox.py <command> --help` list all options.
 
@@ -41,6 +42,10 @@ bitrate =
 hidpi = off
 # Linux only: GStreamer H.264 encoder, empty = chosen by priority
 encoder =
+
+[rooms]
+# UW CAS identifier (usually your PESEL), empty = asked when logging in
+cas_user =
 ```
 
 `setup` stores only values that differ from the defaults, so your file holds just your own choices.
@@ -49,7 +54,7 @@ setting with its default.
 
 `setup` only asks about settings that apply to your OS: `hidpi` on macOS, `encoder` on Linux.
 Comments must be on their own lines; text after a value counts as part of the value. The other
-commands refuse to run until `lab_user` is set. Command-line flags override the config. All
+commands refuse to run until `lab_user` is set. Command-line flags override the config. All ssh
 connections go through `students.mimuw.edu.pl`, which is built in.
 
 ## `print`: the student printer
@@ -142,6 +147,86 @@ Before the first run, install what's listed under [Requirements](#requirements).
   token is saved in `~/.local/state/mimtoolbox/`.
 - If you have several H.264 encoders, choose one with `--encoder` or the `encoder` setting.
 
+## `rooms`: free rooms in the MIM building
+
+`rooms` lists the teaching rooms of the MIM building (Banacha 2) with the times they're free on a
+given day. It reads the timetable of each room from [SRS](https://srs.uw.edu.pl), the UW room booking
+system, which covers classes as well as exams and one-off bookings. Office rooms aren't included.
+
+```sh
+mimtoolbox.py rooms                                  # today, 08:00-21:00
+mimtoolbox.py rooms --now --lab                      # labs free right now, and until when
+mimtoolbox.py rooms -d tomorrow --from 12 --to 16 --min-free 90m
+mimtoolbox.py rooms -d fri --lecture --min-seats 150
+mimtoolbox.py rooms --classroom --floor 3 --floor 4
+mimtoolbox.py rooms --plain                          # plain columns, for other programs
+```
+
+```
+Fri 23 Oct 2026 · 08:00–21:00 · free for 30 min or more
+╭──────┬───────┬───────────┬────────────────────────────┬───────────────────────────────────────┬─────────────────────────╮
+│ Room │ Seats │ Kind      │ 8   10  12  14  16  18  20 │ Free                                  │ Equipment               │
+├──────┼───────┼───────────┼────────────────────────────┼───────────────────────────────────────┼─────────────────────────┤
+│ 2041 │    15 │ lab       │ █░░░░░░░░░░░░░░░░░░█░░░███ │ 08:00–08:30  17:30–18:00  19:30–21:00 │ projector screen blinds │
+│ 3042 │    15 │ lab       │ █░░░░░░░░░░░██████████████ │ 08:00–08:30  14:00–21:00              │ projector screen blinds │
+│ 5490 │    15 │ lab       │ ████░░░░░░░░██████████████ │ 08:00–10:00  14:00–21:00              │ ethernet blinds         │
+╰──────┴───────┴───────────┴────────────────────────────┴───────────────────────────────────────┴─────────────────────────╯
+3 rooms · █ free  ░ busy, 30 min per mark
+```
+
+**Equipment** comes from SRS's room attributes: `projector`, `screen` (for the projector), `ethernet`
+(network sockets for a cable), `blinds`, `sound` (speakers, sound system on request) and `multimedia`
+(a full multimedia set), with `–` for none. Two attributes aren't listed: the computer workstations,
+since they're what makes a room a lab, and wifi, which the whole building has. The data is entered by
+hand in SRS, so it can be incomplete.
+
+The timeline shows the day at a glance; each mark counts as free when at least half of its time is.
+The table fits itself to the terminal: spare width goes to the equipment, then the free times, and
+both wrap when space is short. The timeline needs about 115 columns next to the equipment, so on a
+narrower terminal it's left out; below about 75 columns, so is the equipment. On a terminal the table
+is in color (unless `NO_COLOR` is set), and where box-drawing characters can't be shown it's drawn in
+ASCII.
+
+`--plain` prints plain columns instead, without colors, box drawing or equipment, meant for other
+programs to read: a title line, a header line, then one line per room with its free times as
+`HH:MM-HH:MM`, separated by `, `:
+
+```
+Fri 2026-10-23, 08:00-21:00, free for 30 min or more
+room  seats  kind       free
+2041     15  lab        08:00-08:30, 17:30-18:00, 19:30-21:00
+3042     15  lab        08:00-08:30, 14:00-21:00
+```
+
+- **Kinds:** `--lab` are rooms with computer workstations, `--lecture` rooms with 100 or more seats,
+  `--classroom` the rest. They can be combined, e.g. `--lab --classroom`.
+- **When:** `-d/--date` takes `YYYY-MM-DD`, `today` (the default), `tomorrow` or a weekday (`fri`,
+  `monday`: today or the next one). `--from`/`--to` set the window (default 08:00-21:00). `--now`
+  shows only rooms that are free right now.
+- **How long:** free times shorter than `--min-free` (default `30m`) aren't listed, so the breaks
+  between classes don't clutter the list. It takes `45m`, `2h`, `1h30` and so on.
+- **Which rooms:** `--min-seats N` and `--floor N`. The floor is the first digit of the room number,
+  e.g. 3041 is on floor 3.
+
+**Logging in.** SRS needs a UW CAS login, the one you use at `login.uw.edu.pl`. Your identifier there
+is usually your PESEL, not your MIMUW login. `rooms` asks for the password, and the identifier unless
+`cas_user` is set, only when it has no valid session. Neither is ever written to disk. The session
+cookies are kept in `~/.cache/mimtoolbox/srs-cookies*`, readable only by you, so later runs don't ask
+again until the session expires. `rooms --logout` deletes them.
+
+**Speed.** SRS answers only one request per session at a time, and each room's timetable is a
+separate request of about half a second, so one session needs about 15 s for the whole building.
+`rooms` therefore fetches over up to 12 sessions at once, all starting right away with their saved
+cookies. The first one is the one you logged in with. The others come from CAS single sign-on, so
+they don't need the password, and are saved too (`srs-cookies.1` and so on). A session that has
+expired renews itself the same way; only if none of them can is the password asked for. If single
+sign-on has expired while some sessions still work, the tool uses fewer sessions and says so;
+`--logout` makes the next run log in afresh. Logging in also skips SRS's front page, which is big and
+slow to load and not needed.
+
+The room list changes rarely, so it's cached for a week in `~/.cache/mimtoolbox/srs-rooms.json`.
+`--refresh-rooms` fetches it again. The timetables are fetched fresh on every run.
+
 ## Requirements
 
 mimtoolbox uses only the Python standard library, so there's nothing to `pip install`. It calls the
@@ -183,7 +268,8 @@ What each program is for:
 | `ffmpeg` (with AVFoundation, libx264 and VideoToolbox, as in Homebrew's build) | `lab-display` on macOS: capture and encoding |
 | GStreamer and PyGObject (table below) | `lab-display` on Linux |
 
-`print` needs nothing beyond the common programs.
+`print` needs nothing beyond the common programs, and `rooms` needs only Python: it talks to
+`srs.uw.edu.pl` and `login.uw.edu.pl` over HTTPS itself.
 
 `lab-display` on Linux needs a Wayland session whose ScreenCast portal can create virtual monitors
 (e.g. GNOME). The packages in the commands above provide:
@@ -270,9 +356,9 @@ python3 -m unittest        # add -v to see each test's description
 ```
 
 The suite uses only the standard library and runs in well under a second. It never starts real
-processes: any attempt to run `ssh`, `scp` or `lp` fails the test. `HOME`, the config file and the
-cache are redirected to a temporary directory, so running it doesn't touch the lab, the printer or
-your own settings.
+processes or sends HTTP requests: any attempt to run `ssh`, `scp` or `lp`, or to reach SRS, fails the
+test. `HOME`, the config file and the cache are redirected to a temporary directory, so running it
+doesn't touch the lab, the printer, SRS or your own settings.
 
 `tests/test_style.py` checks that every module, class and function, including the tests, has a
 docstring and type hints. To check that the hints are correct, run
