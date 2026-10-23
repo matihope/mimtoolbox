@@ -187,15 +187,28 @@ narrower terminal it's left out; below about 75 columns, so is the equipment. On
 is in color (unless `NO_COLOR` is set), and where box-drawing characters can't be shown it's drawn in
 ASCII.
 
-`--plain` prints plain columns instead, without colors, box drawing or equipment, meant for other
-programs to read: a title line, a header line, then one line per room with its free times as
-`HH:MM-HH:MM`, separated by `, `:
+`--plain` prints tab-separated values instead, for other programs: a header line, then one line per
+room. The free times (`HH:MM-HH:MM`) and the equipment are separated by commas; seats and equipment
+are empty when unknown or none. Room names can contain spaces (`2180 (sala RW)`), so split on tabs
+only. When no room is free, there's just the header. Columns may be added at the end in the future,
+so read them by name:
 
 ```
-Fri 2026-10-23, 08:00-21:00, free for 30 min or more
-room  seats  kind       free
-2041     15  lab        08:00-08:30, 17:30-18:00, 19:30-21:00
-3042     15  lab        08:00-08:30, 14:00-21:00
+room	seats	kind	free	equipment
+2041	15	lab	08:00-08:30,17:30-18:00,19:30-21:00	projector,screen,blinds
+2180 (sala RW)	100	lecture	08:00-21:00	blinds,sound
+5450	24	classroom	08:00-10:15,16:00-21:00	
+```
+
+```sh
+mimtoolbox.py rooms --plain | cut -f1,4                      # room and free times
+mimtoolbox.py rooms --plain --now | awk -F'\t' 'NR > 1 && $5 ~ /projector/ {print $1}'
+```
+
+```python
+import csv, subprocess
+out = subprocess.run(["mimtoolbox.py", "rooms", "--plain"], capture_output=True, text=True).stdout
+rooms = list(csv.DictReader(out.splitlines(), delimiter="\t"))
 ```
 
 - **Kinds:** `--lab` are rooms with computer workstations, `--lecture` rooms with 100 or more seats,

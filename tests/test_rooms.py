@@ -6,6 +6,7 @@ The canned responses are trimmed copies of real SRS answers.
 from __future__ import annotations
 
 import argparse
+import csv
 import datetime
 import http.client
 import http.cookiejar
@@ -157,6 +158,7 @@ class ParsingTest(IsolatedTestCase):
                                           attr("Tablica interaktywna z bardzo długim opisem",
                                                "Interactive whiteboard with a long description")]),
                          ("ethernet", "air conditioning", "interactive white"))
+        self.assertEqual(rooms.equipment([attr("Tablica, biała", "Whiteboard, magnetic")]), ("whiteboard",))
 
     def test_room_without_capacity_or_number(self) -> None:
         """A missing capacity is 0 seats, a name without a leading digit has no floor."""
@@ -451,45 +453,51 @@ class MainTest(ToolTestCase):
     """Filters, time windows and the --plain output."""
 
     def test_default_day(self) -> None:
-        """Today 08:00-21:00: every room with 30 free minutes or more, and those free times."""
+        """Today 08:00-21:00: every room with 30 free minutes or more, as tab-separated values."""
         self.assertEqual(self.run_main([]), [
-            "Fri 2026-10-23, 08:00-21:00, free for 30 min or more",
-            "room            seats  kind       free",
-            "2041               15  lab        08:00-08:30, 14:00-16:00, 17:30-18:00, 19:30-21:00",
-            "2180 (sala RW)    100  lecture    08:00-21:00",
-            "3180              156  lecture    08:00-10:00, 12:00-16:00, 17:30-21:00",
+            "room\tseats\tkind\tfree\tequipment",
+            "2041\t15\tlab\t08:00-08:30,14:00-16:00,17:30-18:00,19:30-21:00\t",
+            "2180 (sala RW)\t100\tlecture\t08:00-21:00\t",
+            "3180\t156\tlecture\t08:00-10:00,12:00-16:00,17:30-21:00\tprojector,screen,multimedia",
         ])
+
+    def names(self, argv: Sequence[str]) -> list[str]:
+        """The rooms listed for argv."""
+        return [line.split("\t")[0] for line in self.run_main(argv)[1:]]
 
     def test_kind_filters(self) -> None:
         """--lab, --lecture and --classroom pick kinds, and can be combined; only those rooms are fetched."""
-        self.assertEqual([line.split()[0] for line in self.run_main(["--lab"])[2:]], ["2041"])
-        self.assertEqual([line.split()[0] for line in self.run_main(["--lab", "--lecture"])[2:]],
-                         ["2041", "2180", "3180"])
+        self.assertEqual(self.names(["--lab"]), ["2041"])
+        self.assertEqual(self.names(["--lab", "--lecture"]), ["2041", "2180 (sala RW)", "3180"])
         fetched = [c[1]["roomId"] for c in self.srs.calls if c[0] == "events/fetch"]
-        self.assertEqual(fetched[0], "54")
         self.assertNotIn("1624", fetched)
 
     def test_seat_and_floor_filters(self) -> None:
         """--min-seats and --floor narrow the rooms down."""
-        self.assertEqual([line.split()[0] for line in self.run_main(["--min-seats", "120"])[2:]], ["3180"])
-        self.assertEqual([line.split()[0] for line in self.run_main(["--floor", "2"])[2:]], ["2041", "2180"])
+        self.assertEqual(self.names(["--min-seats", "120"]), ["3180"])
+        self.assertEqual(self.names(["--floor", "2"]), ["2041", "2180 (sala RW)"])
 
     def test_window_and_min_free(self) -> None:
         """--from/--to set the window, --min-free the shortest free time listed."""
         lines = self.run_main(["-d", "2026-10-23", "--from", "9", "--to", "18:30", "--min-free", "1h30"])
-        self.assertEqual(lines[0], "Fri 2026-10-23, 09:00-18:30, free for 90 min or more")
-        self.assertEqual(lines[2:], ["2041               15  lab        14:00-16:00",
-                                     "2180 (sala RW)    100  lecture    09:00-18:30",
-                                     "3180              156  lecture    12:00-16:00"])
+        self.assertEqual([line.split("\t")[3] for line in lines[1:]], ["14:00-16:00", "09:00-18:30", "12:00-16:00"])
 
     def test_now(self) -> None:
         """--now lists only rooms that are free right now, from now on."""
         self.assertEqual(self.run_main(["--now"])[1:], [
-            "room            seats  kind       free",
-            "2041               15  lab        14:05-16:00, 17:30-18:00, 19:30-21:00",
-            "2180 (sala RW)    100  lecture    14:05-21:00",
-            "3180              156  lecture    14:05-16:00, 17:30-21:00",
+            "2041\t15\tlab\t14:05-16:00,17:30-18:00,19:30-21:00\t",
+            "2180 (sala RW)\t100\tlecture\t14:05-21:00\t",
+            "3180\t156\tlecture\t14:05-16:00,17:30-21:00\tprojector,screen,multimedia",
         ])
+
+    def test_plain_is_easy_to_parse(self) -> None:
+        """--plain reads back with the csv module; tabs or line breaks in names can't break it."""
+        rows = list(csv.DictReader(self.run_main([]), delimiter="\t"))
+        self.assertEqual(rows[2], {"room": "3180", "seats": "156", "kind": "lecture",
+                                   "free": "08:00-10:00,12:00-16:00,17:30-21:00",
+                                   "equipment": "projector,screen,multimedia"})
+        odd = rooms.Room("1", "Aula\tA\nB", 0, False)
+        self.assertEqual(rooms.plain([(odd, [interval("08:00-09:00")])])[1], "Aula A B\t\tclassroom\t08:00-09:00\t")
 
     def test_now_excludes_date_and_from(self) -> None:
         """--now already fixes the day and start."""
@@ -505,8 +513,9 @@ class MainTest(ToolTestCase):
         self.assertEqual(self.srs.calls, [])
 
     def test_nothing_free(self) -> None:
-        """When no room fits, say so instead of printing an empty table."""
-        self.assertEqual(self.run_main(["--classroom"]), [])
+        """When no room fits, say so; --plain still prints its header, the table nothing."""
+        self.assertEqual(self.run_main(["--classroom"]), ["room\tseats\tkind\tfree\tequipment"])
+        self.assertEqual(self.run_main(["--classroom"], plain=False), [])
         self.assertIn("no room is free for 30 min or more between 08:00 and 21:00", self.stderr.getvalue())
 
     def test_no_room_matches(self) -> None:

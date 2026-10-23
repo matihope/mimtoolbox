@@ -10,7 +10,7 @@ Examples:
   mimtoolbox.py rooms -d tomorrow --from 12 --to 16 --min-free 90m
   mimtoolbox.py rooms -d fri --lecture --min-seats 150
   mimtoolbox.py rooms --classroom --floor 3 --floor 4
-  mimtoolbox.py rooms --plain                  plain columns, for other programs to read
+  mimtoolbox.py rooms --plain                  tab-separated values, for other programs
 
 SRS needs a UW CAS login (login.uw.edu.pl): your identifier, usually your PESEL, and password. They're
 asked for when needed and never stored. The session cookies are kept, readable only by you, in
@@ -79,7 +79,8 @@ EQUIPMENT: Sequence[Tuple[str, str]] = [
 ]
 """Short labels for the room attributes, by the start of their Polish description, in the order shown.
 
-Attributes not in this list or NOT_SHOWN are shown by their English description (cut to GEAR_WIDTH).
+Attributes not in this list or NOT_SHOWN are shown by their English description, up to the first
+comma and cut to GEAR_WIDTH.
 """
 NOT_SHOWN: Sequence[str] = [LAB_ATTR, "Sieć radiowa"]
 """Attributes left out of the equipment, by the start of their Polish description: the PC workstations
@@ -137,7 +138,9 @@ def equipment(attrs: Sequence[Mapping[str, Any]]) -> Tuple[str, ...]:
         if known:
             labels.append((known[0], EQUIPMENT[known[0]][1]))
         elif not pl.startswith(tuple(NOT_SHOWN)):
-            labels.append((len(EQUIPMENT), (a.get("descriptionEn") or pl).lower()[:GEAR_WIDTH]))
+            # Up to the first comma ('Projector, installed permanently'), so labels never contain one.
+            label = (a.get("descriptionEn") or pl).split(",")[0].strip().lower()[:GEAR_WIDTH]
+            labels.append((len(EQUIPMENT), label))
     return tuple(label for _, label in sorted(labels))
 
 
@@ -560,17 +563,25 @@ Shown = Sequence[Tuple[Room, Sequence[Interval]]]
 """The rooms to list, each with its free times."""
 
 
-def plain(shown: Shown, start: datetime.datetime, end: datetime.datetime, min_free: datetime.timedelta) -> list[str]:
-    """The --plain output: a title line, a header and one line per room, in columns of spaces.
+PLAIN_COLUMNS: Sequence[str] = ["room", "seats", "kind", "free", "equipment"]
+"""The --plain header; columns may be added at the end later, but these stay as they are."""
 
-    Meant to stay stable for other programs to read: free times are HH:MM-HH:MM, separated by ', '.
+
+def plain(shown: Shown) -> list[str]:
+    """The --plain output, for other programs: tab-separated values under a header line (PLAIN_COLUMNS).
+
+    One line per room: its name (which may contain spaces), seats (empty if unknown), kind (lab,
+    lecture or classroom), free times as HH:MM-HH:MM and equipment labels, both separated by commas
+    (equipment empty if none). Without any room to list there's just the header.
     """
-    width = max(4, *(len(r.name) for r, _ in shown))
-    lines = [f"{start:%a %Y-%m-%d}, {start:%H:%M}-{end:%H:%M}, free for {minutes(min_free)} min or more",
-             f"{'room':<{width}}  seats  kind       free"]
+    def field(text: str) -> str:
+        """A value without tabs or line breaks, which would break the format."""
+        return " ".join(text.split())
+
+    lines = ["\t".join(PLAIN_COLUMNS)]
     for room, free in shown:
-        times = ", ".join(f"{s:%H:%M}-{t:%H:%M}" for s, t in free)
-        lines.append(f"{room.name:<{width}}  {room.seats or '?':>5}  {room.kind:<9}  {times}")
+        lines.append("\t".join([field(room.name), str(room.seats or ""), room.kind,
+                                ",".join(f"{s:%H:%M}-{t:%H:%M}" for s, t in free), ",".join(room.equipment)]))
     return lines
 
 
@@ -783,9 +794,9 @@ def add_arguments(ap: argparse.ArgumentParser) -> None:
                    help="floor, the first digit of the room number; repeatable")
 
     g = ap.add_argument_group("output")
-    g.add_argument("--plain", action="store_true", help="plain columns instead of the table, without colors: "
-                   "a title line, a header, then one line per room with its free times separated by ', '; "
-                   "stays stable for other programs to read")
+    g.add_argument("--plain", action="store_true", help="tab-separated values for other programs instead of "
+                   "the table: a header (room, seats, kind, free, equipment), then one line per room, with "
+                   "the free times (HH:MM-HH:MM) and equipment separated by commas")
 
     g = ap.add_argument_group("session")
     g.add_argument("--refresh-rooms", action="store_true", help="fetch the room list again instead of using the "
@@ -820,12 +831,9 @@ def main(a: argparse.Namespace, ctx: Context) -> int | None:
     if not shown:
         log(f"no room is free{' now' if a.now else ''} for {minutes(a.min_free)} min or more "
             f"between {start:%H:%M} and {end:%H:%M}")
-        return None
-
     if a.plain:
-        lines = plain(shown, start, end, a.min_free)
-    else:
-        lines = pretty(shown, start, end, a.min_free, style_for(sys.stdout),
-                       shutil.get_terminal_size((100, 24)).columns)
-    print("\n".join(lines))
+        print("\n".join(plain(shown)))  # the header even without rooms, so the format never changes
+    elif shown:
+        print("\n".join(pretty(shown, start, end, a.min_free, style_for(sys.stdout),
+                               shutil.get_terminal_size((100, 24)).columns)))
     return None
