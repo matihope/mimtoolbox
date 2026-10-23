@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pathlib
 import subprocess
+import urllib.request
 
 from mimtoolbox import cli, config, core, tools
 from tests.support import IsolatedTestCase, captured_stdout
@@ -14,7 +15,7 @@ class DiscoveryTest(IsolatedTestCase):
 
     def test_finds_all_tools(self) -> None:
         """Every module in mimtoolbox/tools with a COMMAND is a tool, sorted by command."""
-        self.assertEqual([t.COMMAND for t in tools.discover()], ["lab-display", "print"])
+        self.assertEqual([t.COMMAND for t in tools.discover()], ["lab-display", "print", "rooms"])
 
     def test_tools_follow_the_contract(self) -> None:
         """Each tool has the attributes and functions the dispatcher relies on."""
@@ -34,7 +35,7 @@ class DispatchTest(IsolatedTestCase):
         """--help lists setup and every tool."""
         with captured_stdout() as out, self.assertExits(0):
             cli.main(["--help"])
-        for command in ("setup", "print", "lab-display"):
+        for command in ("setup", "print", "lab-display", "rooms"):
             self.assertIn(command, out.getvalue())
 
     def test_tool_help_shows_module_docstring(self) -> None:
@@ -73,6 +74,11 @@ class SafetyNetTest(IsolatedTestCase):
             subprocess.run(["true"])
         with self.assertRaises(AssertionError):
             subprocess.Popen(["true"])
+
+    def test_network_is_blocked(self) -> None:
+        """Tests can't send HTTP requests, so nothing reaches SRS or CAS."""
+        with self.assertRaises(AssertionError):
+            urllib.request.urlopen("https://srs.uw.edu.pl/")
 
     def test_home_is_isolated(self) -> None:
         """The config file and HOME point into the temp dir."""
