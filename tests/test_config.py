@@ -124,8 +124,8 @@ class SetupTest(IsolatedTestCase):
         cp = config.load()
         return {s: dict(cp[s]) for s in cp.sections()}
 
-    # On macOS, after lab_user: lab-display's priority, fps, bitrate, hidpi, then print's printer.
-    OTHERS = 5
+    # On macOS, after lab_user: lab-display's priority, fps, bitrate, hidpi, print's printer, rooms' cas_user.
+    OTHERS = 6
 
     def test_fresh_setup_on_macos(self) -> None:
         """Asks lab_user and the macOS settings (not the Linux encoder); defaults aren't stored."""
@@ -138,16 +138,16 @@ class SetupTest(IsolatedTestCase):
     def test_only_non_defaults_stored(self) -> None:
         """A value that differs from the default is stored; one equal to it is removed."""
         self.write_config("[common]\nlab_user = xy123\n[lab-display]\nfps = 30\nhidpi = off\n")
-        self.run_setup("", "quality", "", "", "on", "")
+        self.run_setup("", "quality", "", "", "on", "", "")
         self.assertEqual(self.saved(), {"common": {"lab_user": "xy123"},
                                         "lab-display": {"priority": "quality", "fps": "30", "hidpi": "on"}})
-        self.run_setup("", "latency", "-", "", "off", "")
+        self.run_setup("", "latency", "-", "", "off", "", "")
         self.assertEqual(self.saved(), {"common": {"lab_user": "xy123"}})
 
     def test_linux_asks_encoder_not_hidpi(self) -> None:
         """On Linux the macOS-only setting is skipped and the Linux one asked."""
         self.patch("sys.platform", "linux")
-        prompts = self.run_setup("xy123", "", "", "", "x264enc", "")
+        prompts = self.run_setup("xy123", "", "", "", "x264enc", "", "")
         self.assertFalse(any("HiDPI" in p for p in prompts))
         self.assertTrue(any("GStreamer" in p for p in prompts))
         self.assertEqual(self.saved()["lab-display"], {"encoder": "x264enc"})
@@ -161,7 +161,7 @@ class SetupTest(IsolatedTestCase):
     def test_enter_keeps_and_dash_clears(self) -> None:
         """Enter keeps the current value (shown in brackets), `-` clears an optional one."""
         self.write_config("[common]\nlab_user = xy123\n[print]\nprinter = drk\n[lab-display]\nfps = 60\n")
-        prompts = self.run_setup("", "", "", "", "", "-")
+        prompts = self.run_setup("", "", "", "", "", "-", "")
         self.assertIn("[xy123]", prompts[0])
         self.assertTrue(any("[60]" in p for p in prompts))
         self.assertEqual(self.saved(), {"common": {"lab_user": "xy123"}, "lab-display": {"fps": "60"}})
